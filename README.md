@@ -5,7 +5,7 @@
 **在微信里查用量、画图片、发语音，知道每次等待花在哪里。**
 
 [![AstrBot](https://img.shields.io/badge/AstrBot-4.29.3%E2%80%934.29.x-294d3c?style=flat-square)](https://github.com/AstrBotDevs/AstrBot)
-[![Version](https://img.shields.io/badge/version-1.3.0-46734d?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.4.0-46734d?style=flat-square)](CHANGELOG.md)
 [![Platform](https://img.shields.io/badge/platform-weixin__oc-487b68?style=flat-square)](https://docs.astrbot.app/platform/weixin_oc.html)
 [![License](https://img.shields.io/badge/license-MIT-627364?style=flat-square)](LICENSE)
 
@@ -20,6 +20,7 @@
 | 📊 用量 | `用量` / `今天花了多少钱？` | 只读本机统计，显示今日与累计任务、Token、人民币估算 |
 | 🧭 自然语言 | “这个助手从开始到现在花了多少？” | 模型选择 `wechat_query_usage` 工具查询真实数据 |
 | 💰 官方资费 | `资费` / `刷新资费` | 同步火山官方公开价格，显示来源和缓存时间 |
+| 🧩 模型 | `生图模型` / `刷新生图模型` / `生图模型 flare` | 从当前服务发现模型、查看和切换默认模型 |
 | 🎨 文生图 | `生图 一只戴围巾的橘猫，水彩风格` | 调用你配置的 OpenAI 兼容生图接口，返回图片 |
 | 🖌️ 改图 | 发图并说 `改图 把背景换成雪山，保留人物` | 用本条消息中的1～4张图片编辑；无图时使用本会话上一张生成图 |
 | 🔊 按需语音 | `语音 你好，很高兴认识你` | 调用已配置TTS，发送可播放音频文件 |
@@ -69,6 +70,30 @@ flowchart LR
 
 “银行卡余额”“余额是什么意思”“写一个查询余额的SQL”等不直接拦截。工具自身也会检查管理员权限，模型无法绕过。
 
+## 模型与尺寸
+
+常见兼容模型为 `gpt-image-2`、`gpt-image-2.5-sunburst`、`gpt-image-2.5-flare`。列表由你的服务端和密钥权限决定，不能据此保证每个模型都支持同样的质量、透明背景和编辑功能。
+
+```text
+生图模型
+刷新生图模型
+生图模型 flare
+生图 --model gpt-image-2 --size 16:9 --quality high 一座山间小屋
+改图 --model sunburst --size 3:4 保留主体，把背景改为森林
+```
+
+`GET /models` 使用与生图相同的基础地址和密钥，结果按服务/密钥隔离缓存24小时。接口不支持或读取失败时明确标记预设/手填候选，不能伪装成发现成功。`--model`仅影响本次，`生图模型 ID`修改默认值。支持`sunburst`、`flare`、`gpt2`短名。
+
+| 比例 | 实际像素 | 比例 | 实际像素 |
+| --- | --- | --- | --- |
+| 1:1 | 1024×1024 | 16:9 | 1536×864 |
+| 9:16 | 864×1536 | 3:4 | 960×1280 |
+| 4:3 | 1280×960 | 3:2 | 1536×1024 |
+| 2:3 | 1024×1536 | 2:1 | 1536×768 |
+| 1:2 | 768×1536 | auto | 服务端选择 |
+
+以上预设与自定义像素尺寸均可用于生图和改图。直接指令的参数放在提示词前，具体文字保持原样；自然语言请求也可让模型填写`model/size/quality`工具参数。
+
 ## 生图配置
 
 在 **插件 → 微信助手工具箱 → 配置 → 生图与改图** 中设置：
@@ -76,7 +101,7 @@ flowchart LR
 | 配置 | 默认值 | 说明 |
 | --- | --- | --- |
 | 启用生图 | 关闭 | 配好后开启 |
-| API基础地址 | `https://pucoding.com/v1` | 包含 `/v1`，不要追加 `/images/generations`；支持HTTPS |
+| API基础地址 | 空，由你填写 | 包含 `/v1`，不要追加 `/images/generations`；支持HTTPS |
 | API Key | 空 | 页面密码字段；只存本机配置，不写入仓库 |
 | 模型 | `gpt-image-2.5-sunburst` | 可改为Flare、GPT Image 2或兼容服务支持的模型 |
 | 默认质量 | `low` | 测试低成本；最终作品可选medium/high；xhigh/max需2.5模型 |
@@ -92,7 +117,8 @@ flowchart LR
 - 只接受响应中的 `data[0].b64_json`，不下载接口返回的任意URL。通常无需发送response_format；部分兼容服务要求时可开启该配置。
 - 参考图为PNG/JPEG/WebP，每张≤10MB，最多4张；输出解码后验证格式及像素。
 - 自定义尺寸两边须为16的倍数，每边≤3840，比例1:3～3:1，总像素655360～8294400。
-- 每条消息最多一次生图POST，`n=1`；失败/超时不自动重试、不切换模型或服务，避免重复计费。
+- 默认失败后重试3次（首次+3次，共最多4次），每次尝试及失败后向微信发送进度；可配置0～3次重试。限流、5xx、网络异常和超时会重试；参数错误、401/403等直接提示修正。超时后服务端可能仍在生成，重试可能产生额外计费。
+- 重试只针对生成/编辑请求。图片已生成后发送失败不会再次生成。自然语言生图工具使用AstrBot内置后台任务机制，避免普通工具120秒超时中断长任务。
 - 编辑不会覆盖原图。生成图保存在插件数据的 `images/` 下；每个会话只记住自己的上一张图。图片文件不会自动删除，请按自己的保留策略清理。
 
 也可自然语言让模型调用 `wechat_generate_image`，指定质量和尺寸。模型不能通过工具参数更改API地址、密钥或读取任意服务器文件。
@@ -145,6 +171,12 @@ TTS通过 `tts_provider_id` 选择，留空使用当前会话默认TTS。已验�
 
 LivingMemory和链接解析器是独立插件，不随本项目安装。
 
+## 可搭配的提示词资源
+
+[yang0/handraw-style](https://github.com/yang0/handraw-style) 提供画风、图型、配色和参考图，可作为生图前的设计与提示词层。建议按需选取资源，遵循其模型能力判断和参考图隔离规则，而不是把整库塞进每轮聊天。本插件不内置、重新分发该项目或私人画风，也不会自动上传作品到社区。
+
+它主要帮助提高风格描述和版式的一致性，不能保证每张图片都更好。实际使用需要模型、工具及参考图传递能力配合；资源许可与署名要求以原项目为准。原作者：**yang0**。
+
 ## 常见问题
 
 <details>
@@ -188,5 +220,5 @@ PYTHONPATH=. python data/plugins/astrbot_plugin_wechat_toolkit/runtime_checks.py
 ---
 
 <div align="center">
-MIT · 社区开发 · 与腾讯、火山引擎、PuCoding无官方隶属关系
+MIT · 社区开发 · 与腾讯、火山引擎及任何模型服务商无官方隶属关系
 </div>

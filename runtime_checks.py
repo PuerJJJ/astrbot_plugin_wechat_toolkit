@@ -110,13 +110,85 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         event = Event()
         with patch.object(
             m,
-            "request_image",
+            "request_with_retries",
             new=AsyncMock(side_effect=m.ImageRequestError("timeout")),
         ) as send:
             await self.plugin.make_image(event, "a cat")
             second = await self.plugin.make_image(event, "a cat")
             self.assertEqual(send.await_count, 1)
-            self.assertIn("已尝试", second)
+            self.assertIn("已提交", second)
+
+    async def test_image_tool_background_flag_restored(self):
+        tool = SimpleNamespace(is_background_task=False)
+        self.plugin.context.get_llm_tool_manager = lambda: SimpleNamespace(
+            get_func=lambda name: tool
+        )
+        await self.plugin.initialize()
+        self.assertTrue(tool.is_background_task)
+        await self.plugin.terminate()
+        self.assertFalse(tool.is_background_task)
+
+    async def test_background_flag_keeps_permission_proxy(self):
+        from astrbot.core.agent.tool import FunctionTool
+        from astrbot.core.provider.func_tool_manager import FunctionToolManager
+
+        manager = FunctionToolManager()
+        manager.func_list = [
+            FunctionTool(
+                name="wechat_generate_image",
+                description="test",
+                parameters={"type": "object", "properties": {}},
+            ),
+            FunctionTool(
+                name="other",
+                description="test",
+                parameters={"type": "object", "properties": {}},
+            ),
+        ]
+        self.plugin.context.get_llm_tool_manager = lambda: manager
+        await self.plugin.initialize()
+        guarded = manager.get_full_tool_set().get_tool("wechat_generate_image")
+        self.assertTrue(guarded.is_background_task)
+        self.assertEqual(type(guarded).__name__, "_PermissionGuardedTool")
+        self.assertIsNone(guarded.handler)
+        self.assertFalse(
+            manager.get_full_tool_set().get_tool("other").is_background_task
+        )
+        await self.plugin.terminate()
+        self.assertFalse(manager.get_func("wechat_generate_image").is_background_task)
+
+    async def test_model_selection_and_permission(self):
+        self.plugin._model_choices = AsyncMock(
+            return_value=(list(m.PRESET_MODELS), True)
+        )
+        self.assertIn("仅个人微信管理员", await self.plugin.image_models(Event(False)))
+        self.plugin._model_choices.assert_not_awaited()
+        await self.plugin.image_models(Event(), "select", "flare")
+        self.assertEqual(
+            self.plugin.config["image_generation"]["model"], "gpt-image-2.5-flare"
+        )
+        self.plugin.config["image_generation"]["extra_models"] = ["custom-image"]
+        await self.plugin.image_models(Event(), "select", "custom-image")
+        self.assertEqual(
+            self.plugin.config["image_generation"]["model"], "custom-image"
+        )
+
+    async def test_image_send_failure_never_regenerates(self):
+        self.plugin.config["image_generation"] = {
+            "enabled": True,
+            "api_base": "https://example.com/v1",
+            "api_key": "test-key",
+        }
+        output = Path(self.tmp.name) / "image.png"
+        output.write_bytes(b"test")
+        event = Event()
+        event.send = AsyncMock(side_effect=RuntimeError("send failed"))
+        with patch.object(
+            m, "request_with_retries", new=AsyncMock(return_value=output)
+        ) as post:
+            result = await self.plugin.make_image(event, "cat")
+            self.assertIn("发送失败不会重新生成", result)
+            self.assertEqual(post.await_count, 1)
 
     async def test_generator_close_is_not_an_error_and_restores_patch(self):
         closed = []

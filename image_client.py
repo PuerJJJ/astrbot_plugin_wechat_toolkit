@@ -1,5 +1,6 @@
-"""Bounded OpenAI-compatible image generation; one POST, no automatic retries."""
+"""Bounded OpenAI-compatible image generation; one POST per attempt, bounded retry orchestration."""
 
+import asyncio
 import base64
 import binascii
 import io
@@ -17,7 +18,11 @@ MAX_RESPONSE_BYTES = 48 * 1024 * 1024
 
 
 class ImageRequestError(Exception):
-    """A sanitized error safe to display in chat."""
+    """A sanitized error with explicit retry eligibility."""
+
+    def __init__(self, message, retryable=False):
+        super().__init__(message)
+        self.retryable = retryable
 
 
 def validate_options(config: dict, mode: str):
@@ -149,7 +154,9 @@ async def request_image(
         ):
             if response.status != 200:
                 raise ImageRequestError(
-                    f"生图服务返回HTTP {response.status}。本次不自动重试，请检查配置或额度。"
+                    f"生图服务返回HTTP {response.status}。",
+                    retryable=response.status in {408, 409, 425, 429}
+                    or response.status >= 500,
                 )
             data = bytearray()
             async for chunk in response.content.iter_chunked(65536):
@@ -163,7 +170,10 @@ async def request_image(
                 "接口未返回b64_json图片；请使用支持Base64响应的生图接口。"
             )
         raw = base64.b64decode(encoded, validate=True)
-        ext, _ = validate_image(raw)
+        try:
+            ext, _ = validate_image(raw)
+        except ImageRequestError as exc:
+            raise ImageRequestError(str(exc), retryable=True) from exc
         output_dir.mkdir(parents=True, exist_ok=True)
         output = output_dir / (uuid.uuid4().hex + "." + ext)
         output.write_bytes(raw)
@@ -172,7 +182,29 @@ async def request_image(
         raise
     except (TimeoutError, aiohttp.ClientError) as exc:
         raise ImageRequestError(
-            "生图请求超时或网络异常，服务端可能仍在处理；本次不自动重试。"
+            "生图请求超时或网络异常，服务端可能仍在处理。", retryable=True
         ) from exc
     except (ValueError, KeyError, IndexError, TypeError, binascii.Error) as exc:
-        raise ImageRequestError("生图响应格式不正确；本次不自动重试。") from exc
+        raise ImageRequestError("生图响应格式不正确。", retryable=True) from exc
+
+
+async def request_with_retries(config, prompt, mode, references, output_dir, notify):
+    """Retry only request failures; never include image delivery in this loop."""
+    retries = max(0, min(3, int(config.get("max_retries", 3))))
+    delay = max(0, min(30, float(config.get("retry_delay", 3))))
+    for attempt in range(retries + 1):
+        await notify(
+            f"🎨 {'改图' if mode == 'edit' else '生图'}第 {attempt + 1}/{retries + 1} 次请求｜{config.get('model', 'gpt-image-2.5-sunburst')}｜{config.get('edit_size' if mode == 'edit' else 'size', 'auto')}"
+        )
+        try:
+            return await request_image(config, prompt, mode, references, output_dir)
+        except ImageRequestError as exc:
+            if not exc.retryable or attempt == retries:
+                await notify(
+                    f"❌ 第 {attempt + 1} 次请求失败：{exc} {'已达到重试上限。' if exc.retryable else '请检查参数、权限或配置。'}"
+                )
+                raise
+            await notify(
+                f"⚠️ 第 {attempt + 1} 次请求失败：{exc} {delay:g}秒后进行第 {attempt + 1}/{retries} 次重试。"
+            )
+            await asyncio.sleep(delay)

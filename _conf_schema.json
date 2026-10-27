@@ -30,7 +30,8 @@
       "api_base": {
         "description": "生图API基础地址（含/v1）",
         "type": "string",
-        "default": "https://pucoding.com/v1"
+        "default": "",
+        "hint": "填写你选择的OpenAI兼容服务基础地址，例如https://api.example.com/v1。"
       },
       "api_key": {
         "description": "生图API Key",
@@ -41,7 +42,8 @@
       "model": {
         "description": "生图模型",
         "type": "string",
-        "default": "gpt-image-2.5-sunburst"
+        "default": "gpt-image-2.5-sunburst",
+        "hint": "生图模型可查询服务端列表；支持gpt-image-2、gpt-image-2.5-sunburst、gpt-image-2.5-flare，或手填其他兼容模型。"
       },
       "quality": {
         "description": "默认质量",
@@ -59,12 +61,14 @@
       "size": {
         "description": "文生图尺寸",
         "type": "string",
-        "default": "1024x1024"
+        "default": "1024x1024",
+        "hint": "支持1024x1024等像素，或1:1、16:9、9:16、3:4、4:3等比例。"
       },
       "edit_size": {
         "description": "改图尺寸",
         "type": "string",
-        "default": "auto"
+        "default": "auto",
+        "hint": "改图单独尺寸，可设auto、像素或比例。"
       },
       "output_format": {
         "description": "图片格式",
@@ -101,6 +105,33 @@
           "max": 600,
           "step": 30
         }
+      },
+      "max_retries": {
+        "description": "失败后的最大重试次数",
+        "type": "int",
+        "default": 3,
+        "slider": {
+          "min": 0,
+          "max": 3,
+          "step": 1
+        },
+        "hint": "默认首次请求失败后再重试3次，共最多4次；每次向微信发进度。配置/权限错误不盲重试，超时重试可能产生额外计费。"
+      },
+      "retry_delay": {
+        "description": "重试间隔（秒）",
+        "type": "float",
+        "default": 3,
+        "slider": {
+          "min": 0,
+          "max": 30,
+          "step": 1
+        }
+      },
+      "extra_models": {
+        "description": "额外手填生图模型ID",
+        "type": "list",
+        "default": [],
+        "hint": "服务端未提供/models时用于显式添加兼容模型；不表示已实测权限和改图能力。"
       }
     }
   }

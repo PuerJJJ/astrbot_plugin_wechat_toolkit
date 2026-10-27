@@ -23,7 +23,15 @@ from astrbot.core.provider.sources.openai_responses_source import (
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .accounting import usage_report
-from .image_client import ImageRequestError, request_image, validate_options
+from .image_client import ImageRequestError, request_with_retries, validate_options
+from .image_options import (
+    PRESET_MODELS,
+    fetch_image_models,
+    model_fingerprint,
+    normalize_model,
+    normalize_size,
+    parse_image_command,
+)
 from .intent import is_usage_query
 from .pricing import PriceStore
 
@@ -49,6 +57,22 @@ class WechatToolkit(Star):
         self.patches = []
         self.voice_lock = asyncio.Lock()
         self.image_lock = asyncio.Lock()
+        self.models_lock = asyncio.Lock()
+        self.models_path = self.root / "image-models.json"
+        self.image_model_cache = {}
+        try:
+            if self.models_path.is_file():
+                self.image_model_cache = json.loads(self.models_path.read_text())
+        except (OSError, ValueError):
+            pass
+        if (
+            not isinstance(self.image_model_cache, dict)
+            or not isinstance(self.image_model_cache.get("models", []), list)
+            or not isinstance(self.image_model_cache.get("fetched_at", 0), (int, float))
+        ):
+            self.image_model_cache = {}
+        self.image_tool = None
+        self.image_toolset_patch = None
         self.prices = PriceStore(self.root)
         self.price_task = None
         self.last_images_path = self.root / "last-images.json"
@@ -69,6 +93,25 @@ class WechatToolkit(Star):
 
     async def initialize(self):
         self.price_task = asyncio.create_task(self.prices.run())
+        manager_getter = getattr(self.context, "get_llm_tool_manager", None)
+        if callable(manager_getter):
+            manager = manager_getter()
+            tool = manager.get_func("wechat_generate_image")
+            if tool is not None:
+                self.image_tool = (tool, tool.is_background_task)
+                tool.is_background_task = True
+            original_full = getattr(manager, "get_full_tool_set", None)
+            if callable(original_full):
+
+                def full_tool_set():
+                    tools = original_full()
+                    guarded = tools.get_tool("wechat_generate_image")
+                    if guarded is not None:
+                        guarded.is_background_task = True
+                    return tools
+
+                self.image_toolset_patch = (manager, original_full, full_tool_set)
+                manager.get_full_tool_set = full_tool_set
         if not self.config.get("enable_timing", False):
             return
         owner = self
@@ -202,6 +245,14 @@ class WechatToolkit(Star):
         )
 
     async def terminate(self):
+        if self.image_toolset_patch is not None:
+            manager, original, replacement = self.image_toolset_patch
+            if manager.get_full_tool_set is replacement:
+                manager.get_full_tool_set = original
+            self.image_toolset_patch = None
+        if self.image_tool is not None:
+            self.image_tool[0].is_background_task = self.image_tool[1]
+            self.image_tool = None
         if self.price_task is not None:
             self.price_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -295,16 +346,123 @@ class WechatToolkit(Star):
         yield event.plain_result("\n".join(lines))
         event.stop_event()
 
-    @filter.regex(r"^/?(?:生图|画图|改图)(?:\s|[：:])", priority=100)
-    async def image_command(self, event: AstrMessageEvent):
+    async def _model_choices(self, refresh=False):
+        config = self.config.get("image_generation", {})
+        fingerprint = model_fingerprint(config)
+        async with self.models_lock:
+            cache = self.image_model_cache
+            if (
+                not refresh
+                and cache.get("fingerprint") == fingerprint
+                and time.time() - cache.get("fetched_at", 0) < 86400
+            ):
+                return cache["models"], True
+            try:
+                models = await fetch_image_models(config)
+                self.image_model_cache = {
+                    "fingerprint": fingerprint,
+                    "fetched_at": time.time(),
+                    "models": models,
+                }
+                tmp = self.models_path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(self.image_model_cache))
+                tmp.replace(self.models_path)
+                return models, True
+            except Exception as exc:  # noqa: BLE001 - never return provider credentials or raw responses
+                logger.warning("Image model discovery failed: %s", type(exc).__name__)
+                manual = list(PRESET_MODELS) + list(config.get("extra_models", []))
+                return list(dict.fromkeys(str(x) for x in manual if x)), False
+
+    @filter.regex(r"^/?(?:生图模型|刷新生图模型|切换生图模型)(?:\s+.*)?$", priority=100)
+    async def image_models_command(self, event: AstrMessageEvent):
         if event.get_platform_name() != "weixin_oc":
             return
         text = event.get_message_str().strip().lstrip("/")
-        result = await self.make_image(
-            event,
-            text[2:].lstrip(" ：:"),
-            mode="edit" if text.startswith("改图") else "generate",
+        words = text.split(maxsplit=1)
+        action = (
+            "refresh"
+            if words[0] == "刷新生图模型"
+            else "select"
+            if len(words) == 2
+            else "list"
         )
+        result = await self.image_models(
+            event, action, words[1] if len(words) == 2 else ""
+        )
+        yield event.plain_result(result)
+        event.stop_event()
+
+    @filter.llm_tool(name="wechat_image_models")
+    async def image_models(
+        self, event: AstrMessageEvent, action: str = "list", model: str = ""
+    ) -> str:
+        """查询生图服务可用模型，或按用户明确要求切换默认模型。不要自行切换模型。列表来自配置服务的/models；返回列表不代表已实测每个模型的生成和编辑能力。
+
+        Args:
+            action(string): list查询缓存、refresh刷新服务列表、select切换默认模型。
+            model(string): select时填写模型ID或sunburst/flare/gpt2，其他动作留空。
+        """
+        if event.get_platform_name() != "weixin_oc" or not event.is_admin():
+            return "仅个人微信管理员可以查询或切换模型。"
+        if action not in {"list", "refresh", "select"}:
+            return "action必须为list、refresh或select。"
+        try:
+            models, discovered = await self._model_choices(action == "refresh")
+            manual = [
+                str(x)
+                for x in self.config.get("image_generation", {}).get("extra_models", [])
+            ]
+            if action == "select":
+                selected = normalize_model(model)
+                if selected not in models + manual:
+                    return "该模型未在当前列表中。请刷新列表，或在插件配置extra_models中显式添加。"
+                config = dict(self.config.get("image_generation", {}))
+                config["model"] = selected
+                self.config["image_generation"] = config
+                save = getattr(self.config, "save_config", None)
+                if callable(save):
+                    save()
+            current = self.config.get("image_generation", {}).get(
+                "model", "gpt-image-2.5-sunburst"
+            )
+            return "\n".join(
+                [
+                    "🎨 生图模型",
+                    (
+                        "来源：服务端/models（24小时缓存）"
+                        if discovered
+                        else "来源：预设/手填；服务发现失败，模型权限未验证"
+                    ),
+                    "当前默认：" + current,
+                ]
+                + ["• " + name for name in models]
+                + (
+                    ["手填候选（未验证）：" + "、".join(manual)]
+                    if discovered and manual
+                    else []
+                )
+                + [
+                    "切换：生图模型 flare",
+                    "本次指定：生图 --model gpt-image-2 --size 9:16 你的提示词",
+                    "模型列表不等于生成/编辑实测结果。",
+                ]
+            )
+        except (ValueError, OSError) as exc:
+            return (
+                str(exc)
+                if isinstance(exc, ValueError)
+                else "模型缓存或配置保存失败，请稍后重试。"
+            )
+
+    @filter.regex(r"^/?(?:生图|画图|改图|该图)(?:\s|[：:])", priority=100)
+    async def image_command(self, event: AstrMessageEvent):
+        if event.get_platform_name() != "weixin_oc":
+            return
+        try:
+            mode, prompt, options = parse_image_command(event.get_message_str())
+            result = await self.make_image(event, prompt, mode=mode, **options)
+        except ValueError as exc:
+            result = str(exc)
         yield event.plain_result(result)
         event.stop_event()
 
@@ -316,26 +474,36 @@ class WechatToolkit(Star):
         mode: str = "generate",
         quality: str = "",
         size: str = "",
+        model: str = "",
     ) -> str:
-        """用户明确要求生成图片、画图或修改图片时使用配置的生图服务。编辑使用本条消息图片，无图片则使用本会话上次生成图。只执行一次付费请求，失败或超时不得自动重试或换模型。用户没有要求生图时不要调用。不能读取任意本地文件。
+        """用户明确要求生成图片、画图或修改图片时使用配置的生图服务。编辑使用本条消息图片，无图片则使用本会话上次生成图。请求失败由插件按配置自动重试，默认重试3次并逐次提示；模型不要重复调用本工具，也不要自行切换模型。用户没有要求生图时不要调用。不能读取任意本地文件。
 
         Args:
             prompt(string): 具体描述目标、风格和构图；改图写明修改内容及必须保留的内容。
             mode(string): generate为文生图，edit为参考图或修改上一张图。
             quality(string): 仅当用户指定时传low、medium、high、xhigh、max或auto，否则留空。
-            size(string): 仅当用户指定时传auto或宽x高，否则留空。
+            size(string): 仅当用户指定时传auto、宽x高或1:1/9:16/16:9/3:4等比例，否则留空。
+            model(string): 仅当用户明确指定时填模型ID或sunburst/flare/gpt2，否则使用配置默认值。
         """
         if event.get_platform_name() != "weixin_oc" or not event.is_admin():
             return "生图功能仅限个人微信管理员使用。"
         config = dict(self.config.get("image_generation", {}))
         if not config.get("enabled", False):
             return "生图尚未启用，请在插件配置填写生图地址和API Key并开启。"
+        try:
+            config["model"] = normalize_model(
+                model or config.get("model", "gpt-image-2.5-sunburst")
+            )
+            for field, default in [("size", "1024x1024"), ("edit_size", "auto")]:
+                config[field] = normalize_size(config.get(field, default))
+        except ValueError as exc:
+            return str(exc)
         if quality:
             config["quality"] = quality
         if size:
-            config["edit_size" if mode == "edit" else "size"] = size
+            config["edit_size" if mode == "edit" else "size"] = normalize_size(size)
         if event.get_extra("wechat_toolkit_image_attempted"):
-            return "本条消息已尝试过生图；为避免重复计费，请等待结果或由用户发新消息明确要求重试。"
+            return "本条消息已提交过生图任务；任务自身会按配置重试，请不要重复调用。"
         if self.image_lock.locked():
             return "已有生图任务正在处理，请稍后再试。"
         digest = hashlib.sha256(event.unified_msg_origin.encode()).hexdigest()
@@ -356,8 +524,12 @@ class WechatToolkit(Star):
                     return "改图需要本条消息包含1～4张图片，或本会话已有生成图片。"
             async with self.image_lock:
                 event.set_extra("wechat_toolkit_image_attempted", True)
-                output = await request_image(
-                    config, prompt, mode, refs, self.root / "images"
+
+                async def notify(message):
+                    await event.send(MessageChain([Plain(message)]))
+
+                output = await request_with_retries(
+                    config, prompt, mode, refs, self.root / "images", notify
                 )
                 self.last_images.pop(digest, None)
                 self.last_images[digest] = output.name
@@ -371,9 +543,7 @@ class WechatToolkit(Star):
             return str(exc)
         except Exception as exc:  # noqa: BLE001 - sanitized image delivery boundary
             logger.warning("Image delivery failed: %s", type(exc).__name__)
-            return (
-                "生图或图片发送失败；若图片已生成，本次不会自动重试，以避免重复计费。"
-            )
+            return "生图或图片发送失败。若图片已经生成，会保留原图，发送失败不会重新生成或重复计费。"
 
     @filter.regex(r"^/?(?:耗时|测速)$", priority=100)
     async def latency(self, event: AstrMessageEvent):
