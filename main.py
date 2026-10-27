@@ -31,14 +31,14 @@ class UsageIntentFilter(filter.CustomFilter):
         )
 
 
-class HanAssistant(Star):
+class WechatToolkit(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
         self.config = config if config is not None else {}
         self.root = (
             Path(get_astrbot_data_path())
             / "plugin_data"
-            / "astrbot_plugin_han_assistant"
+            / "astrbot_plugin_wechat_toolkit"
         )
         self.root.mkdir(parents=True, exist_ok=True)
         self.database = self.root / "latency.db"
@@ -75,7 +75,7 @@ class HanAssistant(Star):
                 "tools": [],
                 "_start": start,
             }
-            event.set_extra("han_timing", data)
+            event.set_extra("wechat_toolkit_timing", data)
             try:
                 return await original_execute(scheduler, event)
             except BaseException as exc:
@@ -100,10 +100,10 @@ class HanAssistant(Star):
                         con.execute(
                             "DELETE FROM latency WHERE id NOT IN (SELECT id FROM latency ORDER BY id DESC LIMIT 2000)"
                         )
-                    logger.info("Han latency: " + json.dumps(safe))
+                    logger.info("WeChat toolkit latency: " + json.dumps(safe))
                 except sqlite3.Error as exc:
                     logger.warning(
-                        "Han latency persistence failed: %s", type(exc).__name__
+                        "WeChat toolkit latency persistence failed: %s", type(exc).__name__
                     )
 
         original_stream = ProviderOpenAIResponses._query_stream
@@ -111,7 +111,7 @@ class HanAssistant(Star):
         @functools.wraps(original_stream)
         async def query_stream(provider, *args, **kwargs):
             event = current_message_event.get()
-            data = event.get_extra("han_timing") if event else None
+            data = event.get_extra("wechat_toolkit_timing") if event else None
             call = {"stream": True}
             start = time.perf_counter()
             if data is not None:
@@ -142,7 +142,7 @@ class HanAssistant(Star):
         @functools.wraps(original_query)
         async def query(provider, *args, **kwargs):
             event = current_message_event.get()
-            data = event.get_extra("han_timing") if event else None
+            data = event.get_extra("wechat_toolkit_timing") if event else None
             start = time.perf_counter()
             call = {"stream": False}
             if data is not None:
@@ -162,7 +162,7 @@ class HanAssistant(Star):
         async def request_json(client, method, endpoint, **kwargs):
             start = time.perf_counter()
             event = current_message_event.get()
-            data = event.get_extra("han_timing") if event else None
+            data = event.get_extra("wechat_toolkit_timing") if event else None
             try:
                 return await original_http(client, method, endpoint, **kwargs)
             finally:
@@ -178,7 +178,7 @@ class HanAssistant(Star):
             self.patches.append((cls, name, getattr(cls, name), replacement))
             setattr(cls, name, replacement)
         logger.info(
-            "Han assistant initialized; timing contains no message text or credentials"
+            "WeChat toolkit initialized; timing contains no message text or credentials"
         )
 
     async def terminate(self):
@@ -205,7 +205,7 @@ class HanAssistant(Star):
         yield event.plain_result(await self.query_usage(event))
         event.stop_event()
 
-    @filter.llm_tool(name="han_query_usage")
+    @filter.llm_tool(name="wechat_query_usage")
     async def query_usage(self, event: AstrMessageEvent) -> str:
         """查询本机 AstrBot 的真实用量统计。用户询问本机器人/模型/API今天或累计调用次数、Token、花了多少钱、费用、用量、余额或剩余额度时使用；包括“看看我用了多少”“算算这个助手到现在花了多少”“还剩多少额度”。直接使用此工具，不要执行Shell或自行读取配置/数据库。返回今日和累计统计报告，请保留格式与估算口径。此工具没有账户余额/剩余额度数据，不能把累计消费当余额或编造充值金额。银行卡、话费、购物账单、概念解释、代码开发等无关话题不要调用。"""
         if event.get_platform_name() != "weixin_oc":
@@ -260,7 +260,7 @@ class HanAssistant(Star):
 
     @filter.on_using_llm_tool()
     async def tool_start(self, event, tool, tool_args):
-        data = event.get_extra("han_timing")
+        data = event.get_extra("wechat_toolkit_timing")
         if data is not None:
             data.setdefault("_tool_starts", {})[(tool.name, id(tool_args))] = (
                 time.perf_counter()
@@ -268,7 +268,7 @@ class HanAssistant(Star):
 
     @filter.on_llm_tool_respond()
     async def tool_end(self, event, tool, tool_args, tool_result):
-        data = event.get_extra("han_timing")
+        data = event.get_extra("wechat_toolkit_timing")
         if data is not None:
             start = data.get("_tool_starts", {}).pop((tool.name, id(tool_args)), None)
             if start:
@@ -286,7 +286,7 @@ class HanAssistant(Star):
             yield event.plain_result(result)
         event.stop_event()
 
-    @filter.llm_tool(name="han_send_voice")
+    @filter.llm_tool(name="wechat_send_voice")
     async def send_voice_file(self, event: AstrMessageEvent, text: str) -> str:
         """Use the configured TTS to send an audio file when the user explicitly asks for voice. Personal WeChat does not support native voice bubbles. Do not install TTS packages or run shell commands for speech.
 
@@ -316,7 +316,7 @@ class HanAssistant(Star):
                 path = Path(
                     await asyncio.wait_for(provider.get_audio(text), timeout=45)
                 )
-                data = event.get_extra("han_timing")
+                data = event.get_extra("wechat_toolkit_timing")
                 if data is not None:
                     data["tts_s"] = time.perf_counter() - start
                 if not path.is_file() or path.stat().st_size == 0:

@@ -1,4 +1,4 @@
-# 微信用量、耗时与按需语音
+# 微信助手工具箱
 
 为 AstrBot 个人微信（`weixin_oc`）提供自然语言用量查询、人民币费用估算、按需 TTS 音频文件，以及可选的链路耗时诊断。
 
@@ -6,8 +6,8 @@
 
 - **快捷查询**：发送 `余额`、`额度`、`用量`、`费用`、`消费`、`用量统计`，支持 `/` 前缀。
 - **常见自然语言**：`今天花了多少钱？`、`帮我查一下余额`、`这个机器人今天用了多少Token`、`还剩多少额度`，直接读取统计，无需大模型。
-- **模型工具**：复杂表达通过 `han_query_usage` 查询真实统计。需要启用AI、支持函数调用的模型、人格允许该工具。工具选择由模型决定，不保证任意说法都触发。
-- **按需语音**：`语音 你好` / `语音：你好`，或模型调用 `han_send_voice`；使用已配置的TTS，发送音频文件，最多600字。
+- **模型工具**：复杂表达通过 `wechat_query_usage` 查询真实统计。需要启用AI、支持函数调用的模型、人格允许该工具。工具选择由模型决定，不保证任意说法都触发。
+- **按需语音**：`语音 你好` / `语音：你好`，或模型调用 `wechat_send_voice`；使用已配置的TTS，发送音频文件，最多600字。
 - **耗时诊断**：可选开启后发送 `耗时` / `测速`，查看最近完成消息的模型、工具、微信发送时延。
 
 所有指令和模型工具仅允许个人微信管理员使用。非管理员无法读取全局统计或调用语音服务。
@@ -19,7 +19,7 @@
 在 AstrBot → 插件 → 安装插件 → 从链接安装中填写：
 
 ```text
-https://github.com/PuerJJJ/astrbot_plugin_han_assistant
+https://github.com/PuerJJJ/astrbot_plugin_wechat_toolkit
 ```
 
 也可下载本仓库ZIP，从文件安装。插件没有额外Python依赖，使用AstrBot自带环境。
@@ -78,7 +78,7 @@ https://github.com/PuerJJJ/astrbot_plugin_han_assistant
 
 诊断默认关闭。开启后包装 `PipelineScheduler.execute`、`ProviderOpenAIResponses._query/_query_stream`、`WeixinOCClient.request_json`，不会改写AstrBot核心文件。只对个人微信事件记录；模型细分目前只覆盖OpenAI Responses提供商。
 
-诊断写入 `data/plugin_data/astrbot_plugin_han_assistant/latency.db`，保留最近2000条非测速消息。保存数字时延、工具名、错误类型、会话标识哈希，**不保存消息正文、工具参数、模型正文或密钥**。同样的数值摘要会进入AstrBot日志，日志保留周期由AstrBot配置。
+诊断写入 `data/plugin_data/astrbot_plugin_wechat_toolkit/latency.db`，保留最近2000条非测速消息。保存数字时延、工具名、错误类型、会话标识哈希，**不保存消息正文、工具参数、模型正文或密钥**。同样的数值摘要会进入AstrBot日志，日志保留周期由AstrBot配置。
 
 模型耗时包含网络/服务端等待/生成，微信发送计时只到接口返回，不能证明手机显示/已读。入站时间戳差受两端时钟影响。工具耗时合计可能存在并行重叠，不能简单与总时长相加。
 
@@ -90,8 +90,12 @@ https://github.com/PuerJJJ/astrbot_plugin_han_assistant
 python -m unittest discover -p 'test_*.py' -v
 ```
 
-安装插件后，在AstrBot根目录执行 `PYTHONPATH=. python data/plugins/astrbot_plugin_han_assistant/runtime_checks.py` 可运行临时目录与模拟Provider测试；不会发送微信或调用模型。用量测试使用临时数据库，不读取真实账单。
+安装插件后，在AstrBot根目录执行 `PYTHONPATH=. python data/plugins/astrbot_plugin_wechat_toolkit/runtime_checks.py` 可运行临时目录与模拟Provider测试；不会发送微信或调用模型。用量测试使用临时数据库，不读取真实账单。
 
 ## 许可证
 
 MIT。请勿将此项目描述为“真实账户余额插件”或“微信原生语音发送插件”。
+
+## 从旧名称迁移
+
+旧插件名为 `astrbot_plugin_han_assistant`。先停用旧插件，再安装本插件；不要同时启用。管理员可在停用后备份并将旧插件配置文件、plugin_data目录分别迁移到新名称，再核对TTS选择和诊断开关。数据库和聊天记录不需修改。

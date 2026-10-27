@@ -7,13 +7,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from data.plugins.astrbot_plugin_han_assistant import main as m
+from data.plugins.astrbot_plugin_wechat_toolkit import main as m
 
 
 class Event:
     def __init__(self, admin=True):
         self.admin = admin
-        self.extra = {"han_timing": {"_start": time.perf_counter(), "model_calls": []}}
+        self.extra = {"wechat_toolkit_timing": {"_start": time.perf_counter(), "model_calls": []}}
         self.stopped = False
 
     def get_message_str(self):
@@ -42,7 +42,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             m, "get_astrbot_data_path", return_value=self.tmp.name
         )
         self.pathpatch.start()
-        self.plugin = m.HanAssistant(
+        self.plugin = m.WechatToolkit(
             SimpleNamespace(get_provider_by_id=lambda _: None),
             {"tts_provider_id": "mimo_tts", "enable_timing": True},
         )
@@ -102,7 +102,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 m.current_message_event.reset(token)
             self.assertTrue(closed)
-            self.assertNotIn("error", event.extra["han_timing"]["model_calls"][0])
+            self.assertNotIn("error", event.extra["wechat_toolkit_timing"]["model_calls"][0])
             await self.plugin.terminate()
             self.assertIs(m.ProviderOpenAIResponses._query_stream, fake)
 

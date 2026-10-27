@@ -1,5 +1,5 @@
 {
   "tts_provider_id": {"description": "按需语音使用的TTS提供商", "type": "string", "default": "", "_special": "select_provider_tts", "hint": "选择已配置的TTS模型；留空使用当前会话的默认TTS。个人微信以音频文件发送。"},
   "enable_timing": {"description": "启用微信链路耗时诊断", "type": "bool", "default": false, "hint": "包装AstrBot 4.29.3内部方法，记录数字时延和工具名，保留2000条；更改后重载插件。"},
-  "natural_shortcuts": {"description": "常见自然语言用量请求直接返回", "type": "bool", "default": true, "hint": "如今天花了多少钱、还剩多少额度；复杂表达可通过模型调用han_query_usage工具。"}
+  "natural_shortcuts": {"description": "常见自然语言用量请求直接返回", "type": "bool", "default": true, "hint": "如今天花了多少钱、还剩多少额度；复杂表达可通过模型调用wechat_query_usage工具。"}
 }
