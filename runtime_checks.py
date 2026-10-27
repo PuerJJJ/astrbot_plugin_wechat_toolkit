@@ -5,7 +5,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from data.plugins.astrbot_plugin_wechat_toolkit import main as m
 
@@ -13,8 +13,12 @@ from data.plugins.astrbot_plugin_wechat_toolkit import main as m
 class Event:
     def __init__(self, admin=True):
         self.admin = admin
-        self.extra = {"wechat_toolkit_timing": {"_start": time.perf_counter(), "model_calls": []}}
+        self.extra = {
+            "wechat_toolkit_timing": {"_start": time.perf_counter(), "model_calls": []}
+        }
         self.stopped = False
+        self.unified_msg_origin = "test-session"
+        self.sent = []
 
     def get_message_str(self):
         return "用量"
@@ -31,6 +35,15 @@ class Event:
     def stop_event(self):
         self.stopped = True
 
+    def set_extra(self, key, value):
+        self.extra[key] = value
+
+    def get_messages(self):
+        return []
+
+    async def send(self, chain):
+        self.sent.append(chain)
+
     def get_extra(self, key):
         return self.extra.get(key)
 
@@ -43,9 +56,12 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.pathpatch.start()
         self.plugin = m.WechatToolkit(
-            SimpleNamespace(get_provider_by_id=lambda _: None),
+            SimpleNamespace(get_provider_by_id=lambda _: None, get_config=dict),
             {"tts_provider_id": "mimo_tts", "enable_timing": True},
         )
+
+        self.plugin.prices.get = AsyncMock(return_value=None)
+        self.plugin.prices.run = AsyncMock(return_value=None)
 
     async def asyncTearDown(self):
         await self.plugin.terminate()
@@ -81,6 +97,27 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.initialize()
         self.assertIs(original, m.PipelineScheduler.execute)
 
+    async def test_image_permission_and_disabled_config(self):
+        self.assertIn("仅限", await self.plugin.make_image(Event(False), "a cat"))
+        self.assertIn("尚未启用", await self.plugin.make_image(Event(), "a cat"))
+
+    async def test_image_failure_does_not_repeat_a_paid_request(self):
+        self.plugin.config["image_generation"] = {
+            "enabled": True,
+            "api_base": "https://example.com/v1",
+            "api_key": "test-key",
+        }
+        event = Event()
+        with patch.object(
+            m,
+            "request_image",
+            new=AsyncMock(side_effect=m.ImageRequestError("timeout")),
+        ) as send:
+            await self.plugin.make_image(event, "a cat")
+            second = await self.plugin.make_image(event, "a cat")
+            self.assertEqual(send.await_count, 1)
+            self.assertIn("已尝试", second)
+
     async def test_generator_close_is_not_an_error_and_restores_patch(self):
         closed = []
 
@@ -102,7 +139,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 m.current_message_event.reset(token)
             self.assertTrue(closed)
-            self.assertNotIn("error", event.extra["wechat_toolkit_timing"]["model_calls"][0])
+            self.assertNotIn(
+                "error", event.extra["wechat_toolkit_timing"]["model_calls"][0]
+            )
             await self.plugin.terminate()
             self.assertIs(m.ProviderOpenAIResponses._query_stream, fake)
 

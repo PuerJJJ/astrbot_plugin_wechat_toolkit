@@ -1,7 +1,7 @@
 name: astrbot_plugin_wechat_toolkit
 display_name: 微信助手工具箱
-desc: 自然语言查询本机用量、人民币费用估算、可选微信链路诊断、按需TTS音频文件发送。
-version: 1.2.0
+desc: 个人微信的用量查询、官方资费同步、生图改图、按需语音与链路诊断工具箱。
+version: 1.3.0
 author: PuerJJJ
 repo: https://github.com/PuerJJJ/astrbot_plugin_wechat_toolkit
 astrbot_version: '>=4.29.3,<4.30'

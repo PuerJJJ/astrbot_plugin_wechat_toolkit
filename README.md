@@ -1,101 +1,192 @@
-# 微信助手工具箱
+<div align="center">
 
-为 AstrBot 个人微信（`weixin_oc`）提供自然语言用量查询、人民币费用估算、按需 TTS 音频文件，以及可选的链路耗时诊断。
+![微信助手工具箱](banner.svg)
 
-## 功能
+**在微信里查用量、画图片、发语音，知道每次等待花在哪里。**
 
-- **快捷查询**：发送 `余额`、`额度`、`用量`、`费用`、`消费`、`用量统计`，支持 `/` 前缀。
-- **常见自然语言**：`今天花了多少钱？`、`帮我查一下余额`、`这个机器人今天用了多少Token`、`还剩多少额度`，直接读取统计，无需大模型。
-- **模型工具**：复杂表达通过 `wechat_query_usage` 查询真实统计。需要启用AI、支持函数调用的模型、人格允许该工具。工具选择由模型决定，不保证任意说法都触发。
-- **按需语音**：`语音 你好` / `语音：你好`，或模型调用 `wechat_send_voice`；使用已配置的TTS，发送音频文件，最多600字。
-- **耗时诊断**：可选开启后发送 `耗时` / `测速`，查看最近完成消息的模型、工具、微信发送时延。
+[![AstrBot](https://img.shields.io/badge/AstrBot-4.29.3%E2%80%934.29.x-294d3c?style=flat-square)](https://github.com/AstrBotDevs/AstrBot)
+[![Version](https://img.shields.io/badge/version-1.3.0-46734d?style=flat-square)](CHANGELOG.md)
+[![Platform](https://img.shields.io/badge/platform-weixin__oc-487b68?style=flat-square)](https://docs.astrbot.app/platform/weixin_oc.html)
+[![License](https://img.shields.io/badge/license-MIT-627364?style=flat-square)](LICENSE)
 
-所有指令和模型工具仅允许个人微信管理员使用。非管理员无法读取全局统计或调用语音服务。
+[快速开始](#快速开始) · [能力一览](#能力一览) · [生图配置](#生图配置) · [资费口径](#资费口径) · [常见问题](#常见问题)
 
-## 安装
+</div>
 
-要求 AstrBot `>=4.29.3,<4.30`、Python 3.10+，目前只声明个人微信平台支持。未验证其他平台或未来版本。
+## 能力一览
 
-在 AstrBot → 插件 → 安装插件 → 从链接安装中填写：
+| 能力 | 你可以这样说 | 实际行为 |
+| --- | --- | --- |
+| 📊 用量 | `用量` / `今天花了多少钱？` | 只读本机统计，显示今日与累计任务、Token、人民币估算 |
+| 🧭 自然语言 | “这个助手从开始到现在花了多少？” | 模型选择 `wechat_query_usage` 工具查询真实数据 |
+| 💰 官方资费 | `资费` / `刷新资费` | 同步火山官方公开价格，显示来源和缓存时间 |
+| 🎨 文生图 | `生图 一只戴围巾的橘猫，水彩风格` | 调用你配置的 OpenAI 兼容生图接口，返回图片 |
+| 🖌️ 改图 | 发图并说 `改图 把背景换成雪山，保留人物` | 用本条消息中的1～4张图片编辑；无图时使用本会话上一张生成图 |
+| 🔊 按需语音 | `语音 你好，很高兴认识你` | 调用已配置TTS，发送可播放音频文件 |
+| ⏱️ 耗时诊断 | `耗时` / `测速` | 查看最近完成消息的模型、工具和微信发送时间 |
+
+> 所有指令和模型工具仅允许 **个人微信管理员** 使用。
+> 这里的“余额/额度”返回的是本机用量卡片；插件没有账户真实余额数据。音频以文件发送，不是原生语音气泡。
+
+## 快速开始
+
+**1. 安装插件**
+
+AstrBot → 插件 → 安装插件 → 从链接安装：
 
 ```text
 https://github.com/PuerJJJ/astrbot_plugin_wechat_toolkit
 ```
 
-也可下载本仓库ZIP，从文件安装。插件没有额外Python依赖，使用AstrBot自带环境。
+**2. 配置管理员**
 
-## 配置
+在AstrBot中将自己的微信ID设为管理员。当前兼容 `>=4.29.3,<4.30`，只声明 `weixin_oc` 支持。Python 3.10+；使用AstrBot自带的 aiohttp、Pillow，不额外安装SDK。
 
-| 配置项 | 默认 | 说明 |
-| --- | --- | --- |
-| `tts_provider_id` | 空 | 选择已配置的TTS；留空使用当前会话默认TTS。不要在此填API Key。 |
-| `natural_shortcuts` | 开 | 保守匹配常见用量问法；无关财务问题和开发/解释类请求不直接拦截。 |
-| `enable_timing` | 关 | 包装本版本内部方法采集时延，开启后重载插件。 |
+**3. 按需开启能力**
 
-先在AstrBot系统配置中将自己的微信ID设置为管理员。语音提供商在AstrBot模型页面配置，不需要开启“所有回复自动TTS”。模型工具还需在人格可用能力中启用。
+- 用量查询默认可用；官方价格在启动时和每24小时尝试同步，也可手动刷新。
+- 语音：在插件配置中选择已添加的TTS提供商，无需开启“所有回复自动TTS”。
+- 生图：填写基础地址、API Key，开启开关。
+- 诊断：默认关闭，开启后重载插件。
 
-## 统计口径：不是账户余额
+先发送 `用量`，再测试你需要的功能。复杂自然语言还需要支持函数调用的对话模型，以及允许使用这些工具的人格。
 
-插件**不访问火山账户余额、充值记录或剩余额度API**，也不读取任何API Key。消息中的“余额/额度”会返回本机用量卡片，并注明非账户余额。
+## 自然语言怎么工作
 
-- 数据来自本机 `data_v4.db` 的 `provider_stats`，以只读模式连接。
-- 今日按北京时间零点划分。
-- 调用次数是**已完成对话任务数**；一个任务可能多次请求模型，不等于HTTP请求次数。
-- Token包含重复输入、缓存输入及推理输出。未完成/失败任务不在统计范围，即使服务商可能计费。
-- 仅内置 `deepseek-v4-1-flash-economy-261017` 公开费率。其他模型正常显示次数和Token，金额显示“部分模型费率未知”，不会伪装成免费。
-- 空闲时段：非缓存输入0.80、缓存输入0.016、输出3.20元/百万Token；北京时间工作日09–12、14–18双倍。按任务完成时段估算，跨时段任务可能有误差。
-- 费率核对日期：2026-10-27。未来价格变化需更新代码。估算不含优惠/赠送额度抵扣、搜索、TTS、STT、Embedding、重排、其他应用及缓存存储费用。
-
-[火山官方价格](https://console.volcengine.com/ark/region:cn-beijing/docs/model-pricing)
-
-示例（演示数字）：
-
-```text
-📊 AstrBot 用量统计
-━━━━━━━━━━━━
-📅 今日 · 10月27日
-  调用　8 次
-  Token　12,345
-  消费　¥0.0123
-
-📚 累计
-  调用　100 次
-  Token　987,654
-  消费　¥0.9876
-━━━━━━━━━━━━
-北京时间｜本机已完成对话任务
-调用按任务计；Token含缓存和推理。
-费用为人民币估算，不含搜索、语音等及优惠抵扣；非账户余额。
+```mermaid
+flowchart LR
+  A[微信消息] --> B{常见查询问法?}
+  B -->|是| C[本地识别]
+  B -->|否| D[对话模型选择工具]
+  D --> E[wechat_query_usage]
+  C --> F[管理员权限检查]
+  E --> F
+  F --> G[只读本机统计 + 官方公开价]
+  G --> H[返回用量卡片]
 ```
 
-## 语音与平台限制
+`wechat_query_usage` 是 `main.py` 通过 AstrBot 注册的函数，不是需要单独安装的服务。常见短句走本地规则；复杂说法由模型理解工具说明后调用。模型选择不能保证覆盖所有表达。
 
-个人微信适配器当前不支持发送原生语音气泡，因此插件发送可播放的音频文件。已验证MiMo TTS的WAV输出；其他提供商与格式应自行验证。TTS会产生提供商费用，权限检查在调用之前执行。
+“银行卡余额”“余额是什么意思”“写一个查询余额的SQL”等不直接拦截。工具自身也会检查管理员权限，模型无法绕过。
 
-[微信适配器说明](https://docs.astrbot.app/platform/weixin_oc.html)
+## 生图配置
 
-## 耗时与隐私
+在 **插件 → 微信助手工具箱 → 配置 → 生图与改图** 中设置：
 
-诊断默认关闭。开启后包装 `PipelineScheduler.execute`、`ProviderOpenAIResponses._query/_query_stream`、`WeixinOCClient.request_json`，不会改写AstrBot核心文件。只对个人微信事件记录；模型细分目前只覆盖OpenAI Responses提供商。
+| 配置 | 默认值 | 说明 |
+| --- | --- | --- |
+| 启用生图 | 关闭 | 配好后开启 |
+| API基础地址 | `https://pucoding.com/v1` | 包含 `/v1`，不要追加 `/images/generations`；支持HTTPS |
+| API Key | 空 | 页面密码字段；只存本机配置，不写入仓库 |
+| 模型 | `gpt-image-2.5-sunburst` | 可改为Flare、GPT Image 2或兼容服务支持的模型 |
+| 默认质量 | `low` | 测试低成本；最终作品可选medium/high；xhigh/max需2.5模型 |
+| 文生图尺寸 | `1024x1024` | 也支持auto或合法自定义尺寸 |
+| 改图尺寸 | `auto` | 根据参考图选择 |
+| 格式 / 背景 | `png` / `auto` | 透明背景需2.5模型和PNG/WebP |
+| 总超时 | 420秒 | 可配置180～600秒 |
 
-诊断写入 `data/plugin_data/astrbot_plugin_wechat_toolkit/latency.db`，保留最近2000条非测速消息。保存数字时延、工具名、错误类型、会话标识哈希，**不保存消息正文、工具参数、模型正文或密钥**。同样的数值摘要会进入AstrBot日志，日志保留周期由AstrBot配置。
+**接口约定**
 
-模型耗时包含网络/服务端等待/生成，微信发送计时只到接口返回，不能证明手机显示/已读。入站时间戳差受两端时钟影响。工具耗时合计可能存在并行重叠，不能简单与总时长相加。
+- 文生图：`POST /images/generations`，JSON请求。
+- 改图：`POST /images/edits`，multipart `image[]`。
+- 只接受响应中的 `data[0].b64_json`，不下载接口返回的任意URL。通常无需发送response_format；部分兼容服务要求时可开启该配置。
+- 参考图为PNG/JPEG/WebP，每张≤10MB，最多4张；输出解码后验证格式及像素。
+- 自定义尺寸两边须为16的倍数，每边≤3840，比例1:3～3:1，总像素655360～8294400。
+- 每条消息最多一次生图POST，`n=1`；失败/超时不自动重试、不切换模型或服务，避免重复计费。
+- 编辑不会覆盖原图。生成图保存在插件数据的 `images/` 下；每个会话只记住自己的上一张图。图片文件不会自动删除，请按自己的保留策略清理。
 
-卸载/停用插件会恢复仍由本插件包装的方法。当前限制兼容版本范围以避免未经验证的升级；未来升级应重新核对接口与数据库结构。
+也可自然语言让模型调用 `wechat_generate_image`，指定质量和尺寸。模型不能通过工具参数更改API地址、密钥或读取任意服务器文件。
 
-## 测试
+> 生图功能不是“免费生图”：费用由你配置的服务商收取。接口模拟测试不能代替你自己服务地址的真实验收。
+
+## 资费口径
+
+### 自动获取，价格数字不写死
+
+价格来源是[火山官方公开价格文档](https://ark.volcengine.com/region:cn-beijing/docs/model-pricing.md)。插件从表格解析当前高峰/空闲单价和时间段，缓存来源、抓取时间及文档哈希。
+
+目前自动解析 **DeepSeek V4.1 Flash 标准版和经济版** 的常规在线推理价格。只对确认直连 `ark.cn-beijing.volces.com` 的对应Provider估算。其他模型、转发服务、低优/低延迟等计费模式不自动套用这些单价。
+
+| 场景 | 显示与处理 |
+| --- | --- |
+| 同步成功 | 显示来源更新时间，使用当前公开价估算 |
+| 同步失败，有缓存 | 保留上次有效价格并提示旧缓存 |
+| 没有价格 / 模型不支持 | 金额显示未知，不按0元计算 |
+| 文档结构或计费单位改变 | 拒绝猜测，保留旧缓存并提示 |
+
+### 它不等于账单
+
+- 调用次数 = **已完成的对话任务数**，一个任务可能多次请求模型。
+- Token包括各轮重复输入、缓存及推理输出；统计按北京时间划分日期。
+- 历史用量按**当前公开价**估算，不是历史实扣账单；任务跨高峰/空闲时段时采用完成时刻，因此存在估算误差。
+- 不包含搜索、图片、TTS/STT、Embedding、记忆总结等独立调用及优惠抵扣；失败/未完成任务的可能费用也不包含。
+- 不把累计消费当余额，不猜测充值额或剩余额度。
+
+火山另有 [GetModelActivation](https://ark.volcengine.com/region:cn-beijing/docs/get-model-activation-api.md) 管理API，`WithPrice=true` 可取得账户计价信息，但需要AK/SK；推理API Key不适用。当前版本使用公开价，不接收管理AK/SK，不承诺账户合同折扣或真实余额。
+
+## 语音与诊断
+
+TTS通过 `tts_provider_id` 选择，留空使用当前会话默认TTS。已验证MiMo WAV；其他提供商和格式需实际验收。指令最多600字，模型工具名为 `wechat_send_voice`。
+
+诊断开启后记录排队、模型请求、工具调用和微信发送接口耗时。模型细分目前只覆盖OpenAI Responses提供商。微信API返回不代表手机已显示/已读，入站时间戳差受时钟影响，工具时长可能重叠。
+
+诊断包装本版本内部方法，版本兼容范围刻意限制为4.29.x，升级前请验证；停用时恢复仍由插件包装的方法。
+
+## 数据与隐私
+
+| 数据 | 位置 | 内容 |
+| --- | --- | --- |
+| 插件配置 | `data/config/astrbot_plugin_wechat_toolkit_config.json` | API地址与密钥、开关等；AstrBot密码框仅遮罩显示 |
+| 诊断库 | `data/plugin_data/astrbot_plugin_wechat_toolkit/latency.db` | 最近2000条数字时延、工具名、错误类型、会话哈希 |
+| 价格缓存 | 同目录 `ark-public-prices.json` | 官方公开价格、来源与更新时间 |
+| 图片 | 同目录 `images/`、`last-images.json` | 生成图及按会话隔离的上一张图索引 |
+
+不记录密钥、模型正文或工具参数到诊断库。生图提示词与选定参考图会发给你配置的生图服务；返回图片提交微信。诊断数值也进入AstrBot日志，其保留期由AstrBot管理。
+
+LivingMemory和链接解析器是独立插件，不随本项目安装。
+
+## 常见问题
+
+<details>
+<summary><strong>为什么说“余额”却返回用量？</strong></summary>
+
+本插件只有本机调用统计和公开单价，没有账户余额接口权限。卡片会说明统计范围，避免把估算费用当真实余额。
+</details>
+
+<details>
+<summary><strong>为什么语音是文件？</strong></summary>
+
+当前个人微信适配器不支持发送原生语音气泡。[官方支持表](https://docs.astrbot.app/platform/weixin_oc.html)。
+</details>
+
+<details>
+<summary><strong>改图没带图片，可以继续改上一张吗？</strong></summary>
+
+可以，默认使用当前会话上一张成功生成图；不会拿另一个会话的图片。新结果另存文件。
+</details>
+
+<details>
+<summary><strong>从旧名称如何迁移？</strong></summary>
+
+旧名为 `astrbot_plugin_han_assistant`。先停用旧插件，再备份并迁移配置和plugin_data目录至新名称；不要同时启用。工具统一为wechat前缀。
+</details>
+
+## 开发与验证
 
 ```sh
 python -m unittest discover -p 'test_*.py' -v
 ```
 
-安装插件后，在AstrBot根目录执行 `PYTHONPATH=. python data/plugins/astrbot_plugin_wechat_toolkit/runtime_checks.py` 可运行临时目录与模拟Provider测试；不会发送微信或调用模型。用量测试使用临时数据库，不读取真实账单。
+测试使用临时数据库、模拟HTTP及合成图片，不调用付费生图服务。安装插件后可在AstrBot根目录运行：
 
-## 许可证
+```sh
+PYTHONPATH=. python data/plugins/astrbot_plugin_wechat_toolkit/runtime_checks.py
+```
 
-MIT。请勿将此项目描述为“真实账户余额插件”或“微信原生语音发送插件”。
+欢迎提交明确的复现步骤、AstrBot版本、平台类型和脱敏日志。请勿上传API Key、原始配置或聊天数据库。
 
-## 从旧名称迁移
+---
 
-旧插件名为 `astrbot_plugin_han_assistant`。先停用旧插件，再安装本插件；不要同时启用。管理员可在停用后备份并将旧插件配置文件、plugin_data目录分别迁移到新名称，再核对TTS选择和诊断开关。数据库和聊天记录不需修改。
+<div align="center">
+MIT · 社区开发 · 与腾讯、火山引擎、PuCoding无官方隶属关系
+</div>

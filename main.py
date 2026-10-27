@@ -6,11 +6,13 @@ import hashlib
 import json
 import sqlite3
 import time
+from contextlib import suppress
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
-from astrbot.api.message_components import File, Plain
+from astrbot.api.message_components import File, Image, Plain
 from astrbot.api.star import Context, Star
 from astrbot.core.pipeline.scheduler import PipelineScheduler
 from astrbot.core.platform.astr_message_event import current_message_event
@@ -21,7 +23,9 @@ from astrbot.core.provider.sources.openai_responses_source import (
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .accounting import usage_report
+from .image_client import ImageRequestError, request_image, validate_options
 from .intent import is_usage_query
+from .pricing import PriceStore
 
 
 class UsageIntentFilter(filter.CustomFilter):
@@ -44,12 +48,27 @@ class WechatToolkit(Star):
         self.database = self.root / "latency.db"
         self.patches = []
         self.voice_lock = asyncio.Lock()
+        self.image_lock = asyncio.Lock()
+        self.prices = PriceStore(self.root)
+        self.price_task = None
+        self.last_images_path = self.root / "last-images.json"
+        try:
+            self.last_images = (
+                json.loads(self.last_images_path.read_text())
+                if self.last_images_path.exists()
+                else {}
+            )
+        except (OSError, ValueError):
+            self.last_images = {}
+        if not isinstance(self.last_images, dict):
+            self.last_images = {}
         with sqlite3.connect(self.database) as con:
             con.execute(
                 "CREATE TABLE IF NOT EXISTS latency (id INTEGER PRIMARY KEY, ended REAL, session_hash TEXT, data TEXT)"
             )
 
     async def initialize(self):
+        self.price_task = asyncio.create_task(self.prices.run())
         if not self.config.get("enable_timing", False):
             return
         owner = self
@@ -103,7 +122,8 @@ class WechatToolkit(Star):
                     logger.info("WeChat toolkit latency: " + json.dumps(safe))
                 except sqlite3.Error as exc:
                     logger.warning(
-                        "WeChat toolkit latency persistence failed: %s", type(exc).__name__
+                        "WeChat toolkit latency persistence failed: %s",
+                        type(exc).__name__,
                     )
 
         original_stream = ProviderOpenAIResponses._query_stream
@@ -182,6 +202,11 @@ class WechatToolkit(Star):
         )
 
     async def terminate(self):
+        if self.price_task is not None:
+            self.price_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self.price_task
+            self.price_task = None
         for cls, name, original, replacement in reversed(self.patches):
             if getattr(cls, name) is replacement:
                 setattr(cls, name, original)
@@ -213,12 +238,142 @@ class WechatToolkit(Star):
         if not event.is_admin():
             return "仅管理员可以查看本机用量。"
         try:
+            snapshot = await self.prices.get()
+            app_config = self.context.get_config()
+            sources = {
+                item["id"]: item for item in app_config.get("provider_sources", [])
+            }
+            eligible = []
+            for item in app_config.get("provider", []):
+                source = sources.get(item.get("provider_source_id"), item)
+                tier = (item.get("custom_extra_body") or {}).get(
+                    "service_tier",
+                    (source.get("custom_extra_body") or {}).get(
+                        "service_tier", "default"
+                    ),
+                )
+                if urlsplit(
+                    source.get("api_base", "")
+                ).hostname == "ark.cn-beijing.volces.com" and tier in (None, "default"):
+                    eligible.append(item["id"])
             return await asyncio.to_thread(
-                usage_report, Path(get_astrbot_data_path()) / "data_v4.db"
+                usage_report,
+                Path(get_astrbot_data_path()) / "data_v4.db",
+                snapshot=snapshot,
+                price_label=self.prices.label(),
+                eligible_provider_ids=eligible,
             )
         except sqlite3.Error as exc:
             logger.warning("Usage query failed: %s", type(exc).__name__)
             return "暂时无法读取用量统计，请稍后再试。"
+
+    @filter.regex(r"^/?(?:资费|刷新资费)$", priority=100)
+    async def tariff(self, event: AstrMessageEvent):
+        if event.get_platform_name() != "weixin_oc":
+            return
+        if not event.is_admin():
+            yield event.plain_result("仅管理员可以查看或刷新资费。")
+            event.stop_event()
+            return
+        snapshot = (
+            await self.prices.refresh(force=True)
+            if "刷新" in event.get_message_str()
+            else await self.prices.get()
+        )
+        lines = ["📋 火山公开模型资费", self.prices.label()]
+        if snapshot:
+            for model, periods in snapshot["models"].items():
+                lines.extend(
+                    [
+                        model,
+                        "空闲 输入/缓存/输出：" + " / ".join(periods["offpeak"]),
+                        "高峰 输入/缓存/输出：" + " / ".join(periods["peak"]),
+                    ]
+                )
+            lines.append("单位：人民币/百万Token；账户折扣与实扣账单未接入。")
+            lines.append(snapshot["source"])
+        yield event.plain_result("\n".join(lines))
+        event.stop_event()
+
+    @filter.regex(r"^/?(?:生图|画图|改图)(?:\s|[：:])", priority=100)
+    async def image_command(self, event: AstrMessageEvent):
+        if event.get_platform_name() != "weixin_oc":
+            return
+        text = event.get_message_str().strip().lstrip("/")
+        result = await self.make_image(
+            event,
+            text[2:].lstrip(" ：:"),
+            mode="edit" if text.startswith("改图") else "generate",
+        )
+        yield event.plain_result(result)
+        event.stop_event()
+
+    @filter.llm_tool(name="wechat_generate_image")
+    async def make_image(
+        self,
+        event: AstrMessageEvent,
+        prompt: str,
+        mode: str = "generate",
+        quality: str = "",
+        size: str = "",
+    ) -> str:
+        """用户明确要求生成图片、画图或修改图片时使用配置的生图服务。编辑使用本条消息图片，无图片则使用本会话上次生成图。只执行一次付费请求，失败或超时不得自动重试或换模型。用户没有要求生图时不要调用。不能读取任意本地文件。
+
+        Args:
+            prompt(string): 具体描述目标、风格和构图；改图写明修改内容及必须保留的内容。
+            mode(string): generate为文生图，edit为参考图或修改上一张图。
+            quality(string): 仅当用户指定时传low、medium、high、xhigh、max或auto，否则留空。
+            size(string): 仅当用户指定时传auto或宽x高，否则留空。
+        """
+        if event.get_platform_name() != "weixin_oc" or not event.is_admin():
+            return "生图功能仅限个人微信管理员使用。"
+        config = dict(self.config.get("image_generation", {}))
+        if not config.get("enabled", False):
+            return "生图尚未启用，请在插件配置填写生图地址和API Key并开启。"
+        if quality:
+            config["quality"] = quality
+        if size:
+            config["edit_size" if mode == "edit" else "size"] = size
+        if event.get_extra("wechat_toolkit_image_attempted"):
+            return "本条消息已尝试过生图；为避免重复计费，请等待结果或由用户发新消息明确要求重试。"
+        if self.image_lock.locked():
+            return "已有生图任务正在处理，请稍后再试。"
+        digest = hashlib.sha256(event.unified_msg_origin.encode()).hexdigest()
+        refs = []
+        try:
+            validate_options(config, mode)
+            if mode == "edit":
+                for component in event.get_messages():
+                    if isinstance(component, Image):
+                        refs.append(Path(await component.convert_to_file_path()))
+                if not refs and digest in self.last_images:
+                    previous = (
+                        self.root / "images" / Path(self.last_images[digest]).name
+                    )
+                    if previous.is_file():
+                        refs = [previous]
+                if not 1 <= len(refs) <= 4:
+                    return "改图需要本条消息包含1～4张图片，或本会话已有生成图片。"
+            async with self.image_lock:
+                event.set_extra("wechat_toolkit_image_attempted", True)
+                output = await request_image(
+                    config, prompt, mode, refs, self.root / "images"
+                )
+                self.last_images.pop(digest, None)
+                self.last_images[digest] = output.name
+                self.last_images = dict(list(self.last_images.items())[-200:])
+                tmp = self.last_images_path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(self.last_images))
+                tmp.replace(self.last_images_path)
+                await event.send(MessageChain([Image.fromFileSystem(str(output))]))
+                return "图片已生成并提交微信发送接口。"
+        except ImageRequestError as exc:
+            return str(exc)
+        except Exception as exc:  # noqa: BLE001 - sanitized image delivery boundary
+            logger.warning("Image delivery failed: %s", type(exc).__name__)
+            return (
+                "生图或图片发送失败；若图片已生成，本次不会自动重试，以避免重复计费。"
+            )
 
     @filter.regex(r"^/?(?:耗时|测速)$", priority=100)
     async def latency(self, event: AstrMessageEvent):

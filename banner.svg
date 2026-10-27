@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" role="img" aria-labelledby="title desc">
+<title id="title">微信助手工具箱 · WeChat Toolkit</title><desc id="desc">AstrBot 社区插件：用量、资费、图片、语音与诊断。</desc>
+<rect width="1200" height="420" rx="24" fill="#10251e"/>
+<path d="M820 0v420M0 330h1200" stroke="#315043" stroke-width="1"/>
+<g fill="none" stroke="#315043" stroke-width="1"><path d="M860 76h260v188H860zM900 36v268M940 36v268M980 36v268M1020 36v268M1060 36v268M1100 36v268M840 116h300M840 156h300M840 196h300M840 236h300"/></g>
+<rect x="874" y="88" width="222" height="156" rx="25" fill="#d5efb0"/>
+<path d="M921 132h128v64h-78l-26 23v-23h-24z" fill="#10251e"/>
+<circle cx="956" cy="163" r="6" fill="#d5efb0"/><circle cx="984" cy="163" r="6" fill="#d5efb0"/><circle cx="1012" cy="163" r="6" fill="#d5efb0"/>
+<text x="62" y="69" font-family="Arial,sans-serif" font-size="15" font-weight="700" letter-spacing="3" fill="#abd38e">ASTRBOT COMMUNITY PLUGIN</text>
+<text x="58" y="157" font-family="PingFang SC,Microsoft YaHei,sans-serif" font-size="62" font-weight="700" fill="#f5f6ee">微信助手工具箱</text>
+<text x="63" y="207" font-family="Arial,sans-serif" font-size="28" letter-spacing="1" fill="#b5c9bf">WECHAT TOOLKIT</text>
+<text x="63" y="276" font-family="PingFang SC,Microsoft YaHei,sans-serif" font-size="20" fill="#f5f6ee">让查询有依据，让创作有入口。</text>
+<g font-family="Arial,PingFang SC,Microsoft YaHei,sans-serif" font-size="17" fill="#d5efb0"><text x="62" y="381">01 / 用量与资费</text><text x="296" y="381">02 / 生图与改图</text><text x="534" y="381">03 / 按需语音</text><text x="872" y="381">04 / 链路诊断</text></g>
+</svg>
