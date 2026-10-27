@@ -54,7 +54,7 @@ class AccountingTests(unittest.TestCase):
             p = Path(d) / "data.db"
             with sqlite3.connect(p) as con:
                 con.execute(
-                    "CREATE TABLE provider_stats (provider_model TEXT,token_input_other INT,token_input_cached INT,token_output INT,end_time REAL,status TEXT,provider_id TEXT)"
+                    "CREATE TABLE provider_stats (provider_model TEXT,token_input_other INT,token_input_cached INT,token_output INT,end_time REAL,status TEXT,provider_id TEXT,umo TEXT)"
                 )
                 for day, hour, status in [
                     (26, 23, "completed"),
@@ -63,7 +63,7 @@ class AccountingTests(unittest.TestCase):
                     (28, 0, "completed"),
                 ]:
                     con.execute(
-                        "INSERT INTO provider_stats VALUES (?,?,?,?,?,?,?)",
+                        "INSERT INTO provider_stats VALUES (?,?,?,?,?,?,?,?)",
                         (
                             a.MODEL,
                             10,
@@ -72,6 +72,7 @@ class AccountingTests(unittest.TestCase):
                             datetime(2026, 10, day, hour, tzinfo=a.TZ).timestamp(),
                             status,
                             "ark",
+                            "bot_a:FriendMessage:user",
                         ),
                     )
             report = a.usage_report(
@@ -79,19 +80,83 @@ class AccountingTests(unittest.TestCase):
                 datetime(2026, 10, 27, 11, tzinfo=a.TZ),
                 snapshot=SNAPSHOT,
                 eligible_provider_ids=("ark",),
+                platform_id="bot_a",
             )
             self.assertIn("调用　1 次", report)
             self.assertIn("调用　2 次", report)
             self.assertIn("Token　60", report)
             self.assertIn("Token　120", report)
             self.assertIn("估算", report)
-            self.assertIn("非账户余额", report)
+            self.assertNotIn("非账户余额", report)
+            self.assertNotIn("本机已完成对话", report)
+
+    def test_bot_scope_is_exact_and_no_unscoped_query(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "scope.db"
+            with sqlite3.connect(p) as con:
+                con.execute(
+                    "CREATE TABLE provider_stats (provider_model TEXT,token_input_other INT,token_input_cached INT,token_output INT,end_time REAL,status TEXT,provider_id TEXT,umo TEXT)"
+                )
+                for bot, tokens in [("bot_a", 100), ("bot_ab", 200), ("bot%_", 300)]:
+                    con.execute(
+                        "INSERT INTO provider_stats VALUES (?,?,?,?,?,?,?,?)",
+                        (
+                            a.MODEL,
+                            tokens,
+                            0,
+                            0,
+                            1,
+                            "completed",
+                            "ark",
+                            bot + ":FriendMessage:user",
+                        ),
+                    )
+            for bot, tokens in [("bot_a", 100), ("bot_ab", 200), ("bot%_", 300)]:
+                report = a.usage_report(
+                    p,
+                    platform_id=bot,
+                    snapshot=SNAPSHOT,
+                    eligible_provider_ids=("ark",),
+                )
+                self.assertIn(f"Token　{tokens}", report)
+                self.assertIn("调用　1 次", report)
+            with self.assertRaises(ValueError):
+                a.usage_report(p)
+
+    def test_turn_receipt_aggregates_all_calls_and_unknowns(self):
+        when = datetime(2026, 10, 27, 10, tzinfo=a.TZ).timestamp()
+        records = [
+            {
+                "provider_id": "ark",
+                "model": a.MODEL,
+                "input_other": 100,
+                "input_cached": 200,
+                "output": 30,
+                "ended": when,
+            },
+            {
+                "provider_id": "ark",
+                "model": a.MODEL,
+                "input_other": 50,
+                "input_cached": 300,
+                "output": 20,
+                "ended": when,
+            },
+        ]
+        result = a.turn_usage_text(records, SNAPSHOT, {"ark"})
+        self.assertIn("700 Token", result)
+        self.assertIn("约¥", result)
+        self.assertIn("费用未知", a.turn_usage_text(records, None, {"ark"}))
+        self.assertIn(
+            "Token未知", a.turn_usage_text([], SNAPSHOT, {"ark"}, attempted=True)
+        )
+        self.assertIn("0 Token", a.turn_usage_text([], SNAPSHOT, {"ark"}))
 
     def test_missing_database_not_created(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "absent.db"
             with self.assertRaises(sqlite3.OperationalError):
-                a.usage_report(p)
+                a.usage_report(p, platform_id="bot_a")
             self.assertFalse(p.exists())
 
 

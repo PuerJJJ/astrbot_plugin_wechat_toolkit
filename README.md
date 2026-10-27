@@ -5,7 +5,7 @@
 **在微信里查用量、画图片、发语音，知道每次等待花在哪里。**
 
 [![AstrBot](https://img.shields.io/badge/AstrBot-4.29.3%E2%80%934.29.x-294d3c?style=flat-square)](https://github.com/AstrBotDevs/AstrBot)
-[![Version](https://img.shields.io/badge/version-1.4.0-46734d?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.5.0-46734d?style=flat-square)](CHANGELOG.md)
 [![Platform](https://img.shields.io/badge/platform-weixin__oc-487b68?style=flat-square)](https://docs.astrbot.app/platform/weixin_oc.html)
 [![License](https://img.shields.io/badge/license-MIT-627364?style=flat-square)](LICENSE)
 
@@ -17,7 +17,7 @@
 
 | 能力 | 你可以这样说 | 实际行为 |
 | --- | --- | --- |
-| 📊 用量 | `用量` / `今天花了多少钱？` | 只读本机统计，显示今日与累计任务、Token、人民币估算 |
+| 📊 用量 | `用量` / `今天花了多少钱？` | 只读当前机器人统计，显示今日与累计任务、Token、人民币估算 |
 | 🧭 自然语言 | “这个助手从开始到现在花了多少？” | 模型选择 `wechat_query_usage` 工具查询真实数据 |
 | 💰 官方资费 | `资费` / `刷新资费` | 同步火山官方公开价格，显示来源和缓存时间 |
 | 🧩 模型 | `生图模型` / `刷新生图模型` / `生图模型 flare` | 从当前服务发现模型、查看和切换默认模型 |
@@ -142,13 +142,45 @@ flowchart LR
 
 ### 它不等于账单
 
-- 调用次数 = **已完成的对话任务数**，一个任务可能多次请求模型。
+- 只统计当前机器人ID下的数据；调用次数 = **已完成的对话任务数**，一个任务可能多次请求模型。
 - Token包括各轮重复输入、缓存及推理输出；统计按北京时间划分日期。
 - 历史用量按**当前公开价**估算，不是历史实扣账单；任务跨高峰/空闲时段时采用完成时刻，因此存在估算误差。
 - 不包含搜索、图片、TTS/STT、Embedding、记忆总结等独立调用及优惠抵扣；失败/未完成任务的可能费用也不包含。
 - 不把累计消费当余额，不猜测充值额或剩余额度。
 
 火山另有 [GetModelActivation](https://ark.volcengine.com/region:cn-beijing/docs/get-model-activation-api.md) 管理API，`WithPrice=true` 可取得账户计价信息，但需要AK/SK；推理API Key不适用。当前版本使用公开价，不接收管理AK/SK，不承诺账户合同折扣或真实余额。
+
+## 多机器人与解析器兼容
+
+用量查询根据触发消息的机器人ID过滤统计数据；管理员在机器人A查询只得到A的数据，在B查询只得到B的数据。不会因为两个机器人使用相同模型、API Key或管理员角色而合并。
+
+卡片只显示今日、累计和“消费（估算）”，详细统计范围在本README说明。“资费”仍可查看价格来源和时间。
+
+`flatten_weixin_forwards` 默认开启：将个人微信不支持的`Nodes/Node`合并转发拆成按顺序发送的普通组件，便于配合独立的[Zhalslar/parser](https://github.com/Zhalslar/astrbot_plugin_parser)插件发送图集和卡片。只包装个人微信适配器，不修改parser源码；停用工具箱时兼容层也会移除。转发最多8层、100个普通组件。
+
+### 原画质视频发送
+
+配置 `download_base_url` 为你自己的 AstrBot 公网 HTTPS 入口（例如 `https://bot.example.com`）。启用 `large_video_links` 后：
+
+- 默认 **20 MB 以内**原样发送视频；`direct_video_max_mb` 可调整阈值。
+- 超过阈值发送**原文件下载链接**，不压缩、不降分辨率。解析源返回什么画质，就保留什么画质。
+- 链接默认 **1 小时有效**，`download_link_ttl` 可调整为 5 分钟至 24 小时，支持重复访问及 Range 续传。
+- 下载使用 AstrBot 内置单文件随机令牌服务。持有链接者可以下载，请勿转发私人视频链接。实例重启会使已有令牌提前失效。
+- 文件副本保存在 `downloads/`，到期自动清理；解析器原缓存不改写。未配置下载入口时继续直接发送原文件。
+
+### 每轮费用尾注
+
+开启 `turn_usage_footer`，个人微信回复末尾会增加一行（示例）：
+
+```text
+本次对话模型：12,345 Token · 约¥0.0021
+```
+
+汇总同一轮 Agent 的多次模型调用，包含输入、缓存输入与输出 Token，不另发请求让模型估算。各消息独立计数，不混合不同机器人或联系人。纯指令未调用模型时显示 0 Token；服务未返回用量或模型费率未知时明确显示未知。
+
+金额是支持模型公开单价的估算，**只含本轮对话模型**，不含生图、TTS、Embedding、独立记忆总结等费用。公共安装默认关闭，可在配置开启；它不改变用量卡片的统计口径。
+
+此处是正常功能路径的数据隔离。AstrBot全局管理员仍可拥有实例级管理与文件/代码权限；共享实例不是互不信任用户之间的安全隔离环境。
 
 ## 语音与诊断
 
@@ -182,7 +214,7 @@ LivingMemory和链接解析器是独立插件，不随本项目安装。
 <details>
 <summary><strong>为什么说“余额”却返回用量？</strong></summary>
 
-本插件只有本机调用统计和公开单价，没有账户余额接口权限。卡片会说明统计范围，避免把估算费用当真实余额。
+本插件只有当前机器人的调用统计和公开单价，没有账户余额接口权限。卡片会说明统计范围，避免把估算费用当真实余额。
 </details>
 
 <details>

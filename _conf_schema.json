@@ -134,5 +134,49 @@
         "hint": "服务端未提供/models时用于显式添加兼容模型；不表示已实测权限和改图能力。"
       }
     }
+  },
+  "flatten_weixin_forwards": {
+    "description": "微信合并转发兼容",
+    "type": "bool",
+    "default": true,
+    "hint": "将Nodes/Node转换为按顺序发送的普通消息组件，兼容parser图集；仅影响个人微信，不修改解析器源码。"
+  },
+  "large_video_links": {
+    "description": "大视频改发原文件下载链接",
+    "type": "bool",
+    "default": true,
+    "hint": "小视频原样发送，大视频提供有效期内的单文件链接，不进行压缩。需配置下载入口。"
+  },
+  "download_base_url": {
+    "description": "服务器下载入口",
+    "type": "string",
+    "default": "",
+    "hint": "填写公网HTTPS AstrBot入口，例如https://bot.example.com，不带/api。链接包含单文件随机令牌，持有链接者可下载。"
+  },
+  "direct_video_max_mb": {
+    "description": "微信直接发送视频上限（MB）",
+    "type": "int",
+    "default": 20,
+    "slider": {
+      "min": 1,
+      "max": 90,
+      "step": 1
+    }
+  },
+  "download_link_ttl": {
+    "description": "原视频链接有效期（秒）",
+    "type": "int",
+    "default": 3600,
+    "slider": {
+      "min": 300,
+      "max": 86400,
+      "step": 300
+    }
+  },
+  "turn_usage_footer": {
+    "description": "每次回复末尾显示本轮模型用量",
+    "type": "bool",
+    "default": false,
+    "hint": "按本轮Agent返回的Token累计，含多次调用；费用按当前支持模型公开价估算，不含生图、语音、Embedding、独立记忆总结等。"
   }
 }

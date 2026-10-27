@@ -23,6 +23,9 @@ class Event:
     def get_message_str(self):
         return "用量"
 
+    def get_platform_id(self):
+        return "bot_a"
+
     def get_platform_name(self):
         return "weixin_oc"
 
@@ -57,7 +60,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.pathpatch.start()
         self.plugin = m.WechatToolkit(
             SimpleNamespace(get_provider_by_id=lambda _: None, get_config=dict),
-            {"tts_provider_id": "mimo_tts", "enable_timing": True},
+            {
+                "tts_provider_id": "mimo_tts",
+                "enable_timing": True,
+                "large_video_links": True,
+            },
         )
 
         self.plugin.prices.get = AsyncMock(return_value=None)
@@ -189,6 +196,245 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             result = await self.plugin.make_image(event, "cat")
             self.assertIn("发送失败不会重新生成", result)
             self.assertEqual(post.await_count, 1)
+
+    async def test_forward_flatten_preserves_order_and_original(self):
+        from astrbot.api.message_components import File, Image, Node, Nodes, Plain
+
+        image = Image.fromFileSystem("/tmp/example.png")
+        file = File(name="sound.wav", file="/tmp/sound.wav")
+        original = m.MessageChain(
+            [
+                Nodes(
+                    [
+                        Node(content=[Plain("header"), image]),
+                        Node(content=[Nodes([Node(content=[file])])]),
+                    ]
+                )
+            ]
+        )
+        flat = m.flatten_forward_chain(original)
+        self.assertEqual(
+            [type(x).__name__ for x in flat.chain], ["Plain", "Image", "File"]
+        )
+        self.assertIs(flat.chain[1], original.chain[0].nodes[0].content[1])
+        self.assertEqual(type(original.chain[0]).__name__, "Nodes")
+
+    async def test_forward_adapter_preserves_bot_and_restores(self):
+        from astrbot.api.message_components import Node, Nodes, Plain
+
+        seen = []
+
+        async def original(adapter, session, message):
+            seen.append((adapter, session, message))
+
+        with patch.object(m.WeixinOCAdapter, "send_by_session", original):
+            await self.plugin.initialize()
+            for bot in ["first", "second"]:
+                await m.WeixinOCAdapter.send_by_session(
+                    bot,
+                    bot + "-session",
+                    m.MessageChain([Nodes([Node(content=[Plain("ok")])])]),
+                )
+            self.assertEqual(
+                [(x[0], x[1]) for x in seen],
+                [("first", "first-session"), ("second", "second-session")],
+            )
+            self.assertTrue(all(type(x[2].chain[0]).__name__ == "Plain" for x in seen))
+            await self.plugin.terminate()
+            self.assertIs(m.WeixinOCAdapter.send_by_session, original)
+
+    async def test_large_video_link_keeps_original(self):
+        from astrbot.api.message_components import Video
+
+        source = Path(self.tmp.name) / "original.mp4"
+        source.write_bytes(b"original-bytes")
+        links = SimpleNamespace(
+            create=AsyncMock(
+                return_value={
+                    "url": "https://example.com/api/file/token",
+                    "size_bytes": source.stat().st_size,
+                }
+            )
+        )
+        chain = m.MessageChain([Video.fromFileSystem(str(source))])
+        output = await m.link_large_videos(
+            chain, links, "https://example.com", threshold_mb=0, ttl=3600
+        )
+        self.assertEqual(type(output.chain[0]).__name__, "Plain")
+        self.assertIn("原视频", output.chain[0].text)
+        self.assertEqual(source.read_bytes(), b"original-bytes")
+        small = await m.link_large_videos(
+            chain, links, "https://example.com", threshold_mb=20
+        )
+        self.assertEqual(type(small.chain[0]).__name__, "Video")
+        self.assertEqual(links.create.await_count, 1)
+
+    async def test_video_link_api_uses_native_json_and_rejects_paths(self):
+        from astrbot.api.web import PluginRequest
+
+        request = unittest.mock.create_autospec(PluginRequest, instance=True)
+        request.json.return_value = {"filename": "../private.mp4"}
+        with patch.object(m, "request", request):
+            result = await self.plugin.create_original_video_link()
+        self.assertEqual(result["message"], "Invalid video filename")
+        request.json.assert_awaited_once()
+
+        root = Path(self.tmp.name) / "plugin_data/astrbot_plugin_parser/cache"
+        root.mkdir(parents=True)
+        source = root / "video.mp4"
+        source.write_bytes(b"original")
+        request.json.return_value = {"filename": source.name}
+        self.plugin.downloads.create = AsyncMock(return_value={"url": "test"})
+        with patch.object(m, "request", request):
+            result = await self.plugin.create_original_video_link()
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(self.plugin.downloads.create.await_args.args[0], source)
+
+    async def test_turn_meter_uses_deltas_and_deduplicates(self):
+        from astrbot.core.agent.runners.tool_loop_agent_runner import (
+            ToolLoopAgentRunner,
+        )
+        from data.plugins.astrbot_plugin_wechat_toolkit.turn_usage import (
+            TurnUsage,
+            new_state,
+        )
+
+        event = Event()
+        event.set_extra("wechat_turn_usage", new_state())
+        context = SimpleNamespace(context=SimpleNamespace(event=event))
+        stats = {
+            "start_time": 1,
+            "end_time": 2,
+            "token_usage": {"input_other": 10, "input_cached": 20, "output": 5},
+        }
+        runner = SimpleNamespace(
+            done=lambda: True,
+            run_context=context,
+            stats=SimpleNamespace(to_dict=lambda: stats.copy()),
+            provider=SimpleNamespace(
+                provider_config={"id": "ark"},
+                meta=lambda: SimpleNamespace(id="ark"),
+                get_model=lambda: "deepseek-v4-1-flash-economy-261017",
+            ),
+        )
+
+        async def step(runner):
+            yield SimpleNamespace(type="agent_stats")
+            yield SimpleNamespace(type="agent_stats")
+            stats.update(
+                end_time=3,
+                token_usage={"input_other": 15, "input_cached": 40, "output": 8},
+            )
+            yield SimpleNamespace(type="agent_stats")
+            yield SimpleNamespace(type="llm_result")
+
+        with patch.object(ToolLoopAgentRunner, "step", step):
+            meter = TurnUsage(self.plugin)
+            meter.install()
+            try:
+                async for _ in ToolLoopAgentRunner.step(runner):
+                    pass
+                state = event.get_extra("wechat_turn_usage")
+                self.assertEqual(len(state["records"]), 2)
+                self.assertEqual(
+                    sum(
+                        r["input_other"] + r["input_cached"] + r["output"]
+                        for r in state["records"]
+                    ),
+                    63,
+                )
+                self.assertTrue(state["done"])
+            finally:
+                meter.close()
+
+    async def test_streaming_receipt_once(self):
+        from astrbot.core.platform.sources.weixin_oc.weixin_oc_event import (
+            WeixinOCMessageEvent,
+        )
+        from data.plugins.astrbot_plugin_wechat_toolkit.turn_usage import (
+            TurnUsage,
+            new_state,
+        )
+
+        event = Event()
+        event.set_extra("wechat_turn_usage", new_state())
+        event.get_extra("wechat_turn_usage")["attempted"] = True
+        emitted = []
+
+        async def original(event, generator, use_fallback=False):
+            async for chain in generator:
+                emitted.append(chain.get_plain_text())
+
+        async def stream():
+            yield m.MessageChain([m.Plain("answer")])
+
+        with patch.object(WeixinOCMessageEvent, "send_streaming", original):
+            meter = TurnUsage(self.plugin)
+            meter.install()
+            try:
+                await WeixinOCMessageEvent.send_streaming(event, stream())
+            finally:
+                meter.close()
+        self.assertEqual(sum("本次对话模型" in x for x in emitted), 1)
+        self.assertIn("Token未知", emitted[-1])
+
+    async def test_receipt_waits_for_final_and_isolated_per_event(self):
+        from astrbot.core.agent.runners.tool_loop_agent_runner import (
+            ToolLoopAgentRunner,
+        )
+        from astrbot.core.platform.sources.weixin_oc.weixin_oc_event import (
+            WeixinOCMessageEvent,
+        )
+        from data.plugins.astrbot_plugin_wechat_toolkit.turn_usage import (
+            TurnUsage,
+            new_state,
+        )
+
+        event, other = Event(), Event()
+        for item in (event, other):
+            item.set_extra("wechat_turn_usage", new_state())
+        sent = []
+        finished = False
+        runner = SimpleNamespace(
+            run_context=SimpleNamespace(context=SimpleNamespace(event=event)),
+            done=lambda: finished,
+        )
+
+        async def step(runner):
+            yield SimpleNamespace(type="llm_result")
+
+        async def send(event, message):
+            sent.append(message.get_plain_text())
+
+        with (
+            patch.object(ToolLoopAgentRunner, "step", step),
+            patch.object(WeixinOCMessageEvent, "send", send),
+        ):
+            meter = TurnUsage(self.plugin)
+            meter.install()
+            try:
+                async for _ in ToolLoopAgentRunner.step(runner):
+                    pass
+                await WeixinOCMessageEvent.send(
+                    event, m.MessageChain([m.Plain("working")])
+                )
+                self.assertNotIn("本次对话模型", sent[-1])
+                finished = True
+                async for _ in ToolLoopAgentRunner.step(runner):
+                    pass
+                await WeixinOCMessageEvent.send(
+                    event, m.MessageChain([m.Plain("answer")])
+                )
+                await WeixinOCMessageEvent.send(
+                    event, m.MessageChain([m.Plain("followup")])
+                )
+                self.assertEqual(sum("本次对话模型" in x for x in sent), 1)
+                self.assertFalse(other.get_extra("wechat_turn_usage")["added"])
+                self.assertFalse(other.get_extra("wechat_turn_usage")["attempted"])
+            finally:
+                meter.close()
+            self.assertIs(WeixinOCMessageEvent.send, send)
+            self.assertIs(ToolLoopAgentRunner.step, step)
 
     async def test_generator_close_is_not_an_error_and_restores_patch(self):
         closed = []

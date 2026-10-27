@@ -8,21 +8,24 @@ import sqlite3
 import time
 from contextlib import suppress
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import File, Image, Plain
 from astrbot.api.star import Context, Star
+from astrbot.api.web import request
+from astrbot.core import file_token_service
 from astrbot.core.pipeline.scheduler import PipelineScheduler
 from astrbot.core.platform.astr_message_event import current_message_event
+from astrbot.core.platform.sources.weixin_oc.weixin_oc_adapter import WeixinOCAdapter
 from astrbot.core.platform.sources.weixin_oc.weixin_oc_client import WeixinOCClient
 from astrbot.core.provider.sources.openai_responses_source import (
     ProviderOpenAIResponses,
 )
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
-from .accounting import usage_report
+from .accounting import eligible_ark_providers, usage_report
+from .downloads import DownloadLinks
 from .image_client import ImageRequestError, request_with_retries, validate_options
 from .image_options import (
     PRESET_MODELS,
@@ -34,6 +37,8 @@ from .image_options import (
 )
 from .intent import is_usage_query
 from .pricing import PriceStore
+from .turn_usage import TurnUsage
+from .weixin_compat import flatten_forward_chain, link_large_videos
 
 
 class UsageIntentFilter(filter.CustomFilter):
@@ -71,6 +76,22 @@ class WechatToolkit(Star):
             or not isinstance(self.image_model_cache.get("fetched_at", 0), (int, float))
         ):
             self.image_model_cache = {}
+        self.video_lock = asyncio.Lock()
+        self.downloads = DownloadLinks(self.root, file_token_service)
+        self.download_task = None
+        self.download_api_handler = self.create_original_video_link
+        self.download_api_route = "/astrbot_plugin_wechat_toolkit/media/link"
+        self.active = True
+        register = getattr(self.context, "register_web_api", None)
+        if callable(register):
+            register(
+                self.download_api_route,
+                self.download_api_handler,
+                ["POST"],
+                "Create a time-limited original parser video link",
+            )
+        self.turn_meter = TurnUsage(self)
+        self.compat_patch = None
         self.image_tool = None
         self.image_toolset_patch = None
         self.prices = PriceStore(self.root)
@@ -92,6 +113,28 @@ class WechatToolkit(Star):
             )
 
     async def initialize(self):
+        if self.config.get("flatten_weixin_forwards", True):
+            original_send = WeixinOCAdapter.send_by_session
+
+            @functools.wraps(original_send)
+            async def compatible_send(adapter, session, message_chain):
+                prepared = flatten_forward_chain(message_chain)
+                if self.config.get("large_video_links", True):
+                    async with self.video_lock:
+                        prepared = await link_large_videos(
+                            prepared,
+                            self.downloads,
+                            self.config.get("download_base_url", ""),
+                            self.config.get("direct_video_max_mb", 20),
+                            self.config.get("download_link_ttl", 3600),
+                        )
+                return await original_send(adapter, session, prepared)
+
+            self.compat_patch = (original_send, compatible_send)
+            WeixinOCAdapter.send_by_session = compatible_send
+        self.download_task = asyncio.create_task(self.downloads.run())
+        if self.config.get("turn_usage_footer", False):
+            self.turn_meter.install()
         self.price_task = asyncio.create_task(self.prices.run())
         manager_getter = getattr(self.context, "get_llm_tool_manager", None)
         if callable(manager_getter):
@@ -245,6 +288,26 @@ class WechatToolkit(Star):
         )
 
     async def terminate(self):
+        self.active = False
+        if self.download_task is not None:
+            self.download_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self.download_task
+        routes = getattr(self.context, "registered_web_apis", None)
+        if isinstance(routes, list):
+            routes[:] = [
+                r
+                for r in routes
+                if not (
+                    r[0] == self.download_api_route
+                    and r[1] is self.download_api_handler
+                )
+            ]
+        if self.compat_patch is not None:
+            original, replacement = self.compat_patch
+            if WeixinOCAdapter.send_by_session is replacement:
+                WeixinOCAdapter.send_by_session = original
+            self.compat_patch = None
         if self.image_toolset_patch is not None:
             manager, original, replacement = self.image_toolset_patch
             if manager.get_full_tool_set is replacement:
@@ -262,6 +325,58 @@ class WechatToolkit(Star):
             if getattr(cls, name) is replacement:
                 setattr(cls, name, original)
         self.patches.clear()
+        self.turn_meter.close()
+
+    async def create_original_video_link(self):
+        if not self.active:
+            return {"status": "error", "message": "Plugin is inactive"}
+        payload = await request.json()
+        name = payload.get("filename", "") if isinstance(payload, dict) else ""
+        import re
+
+        if not isinstance(name, str) or not re.fullmatch(
+            r"[A-Za-z0-9_.-]{1,100}\.(mp4|mov|m4v|webm)", name
+        ):
+            return {"status": "error", "message": "Invalid video filename"}
+        root = Path(get_astrbot_data_path()) / "plugin_data/astrbot_plugin_parser/cache"
+        matches = [
+            p
+            for p in root.rglob(name)
+            if p.is_file() and p.resolve().is_relative_to(root.resolve())
+        ]
+        if len(matches) != 1:
+            return {
+                "status": "error",
+                "message": "Original video was not uniquely found",
+            }
+        try:
+            data = await self.downloads.create(
+                matches[0],
+                self.config.get("download_base_url", ""),
+                self.config.get("download_link_ttl", 3600),
+            )
+            return {"status": "ok", "data": data}
+        except (OSError, ValueError):
+            return {
+                "status": "error",
+                "message": "Unable to create the original video link; check download configuration",
+            }
+
+    @filter.on_decorating_result()
+    async def receipt_on_result(self, event):
+        if event.get_platform_name() != "weixin_oc" or not self.config.get(
+            "turn_usage_footer", False
+        ):
+            return
+        state = event.get_extra("wechat_turn_usage")
+        result = event.get_result()
+        if (
+            state
+            and not state["attempted"]
+            and result
+            and result.result_content_type.name == "GENERAL_RESULT"
+        ):
+            state["direct"] = True
 
     @filter.custom_filter(UsageIntentFilter, priority=100)
     async def usage(self, event: AstrMessageEvent):
@@ -283,7 +398,7 @@ class WechatToolkit(Star):
 
     @filter.llm_tool(name="wechat_query_usage")
     async def query_usage(self, event: AstrMessageEvent) -> str:
-        """查询本机 AstrBot 的真实用量统计。用户询问本机器人/模型/API今天或累计调用次数、Token、花了多少钱、费用、用量、余额或剩余额度时使用；包括“看看我用了多少”“算算这个助手到现在花了多少”“还剩多少额度”。直接使用此工具，不要执行Shell或自行读取配置/数据库。返回今日和累计统计报告，请保留格式与估算口径。此工具没有账户余额/剩余额度数据，不能把累计消费当余额或编造充值金额。银行卡、话费、购物账单、概念解释、代码开发等无关话题不要调用。"""
+        """查询当前微信机器人的真实用量统计。用户询问当前机器人/模型/API今天或累计调用次数、Token、花了多少钱、费用、用量、余额或剩余额度时使用；包括“看看我用了多少”“算算这个助手到现在花了多少”“还剩多少额度”。直接使用此工具，不要执行Shell或自行读取配置/数据库。返回今日和累计统计报告，请保留格式与估算口径。此工具没有账户余额/剩余额度数据，不能把累计消费当余额或编造充值金额。银行卡、话费、购物账单、概念解释、代码开发等无关话题不要调用。"""
         if event.get_platform_name() != "weixin_oc":
             return "本工具仅支持个人微信渠道。"
         if not event.is_admin():
@@ -291,30 +406,16 @@ class WechatToolkit(Star):
         try:
             snapshot = await self.prices.get()
             app_config = self.context.get_config()
-            sources = {
-                item["id"]: item for item in app_config.get("provider_sources", [])
-            }
-            eligible = []
-            for item in app_config.get("provider", []):
-                source = sources.get(item.get("provider_source_id"), item)
-                tier = (item.get("custom_extra_body") or {}).get(
-                    "service_tier",
-                    (source.get("custom_extra_body") or {}).get(
-                        "service_tier", "default"
-                    ),
-                )
-                if urlsplit(
-                    source.get("api_base", "")
-                ).hostname == "ark.cn-beijing.volces.com" and tier in (None, "default"):
-                    eligible.append(item["id"])
+            eligible = eligible_ark_providers(app_config)
             return await asyncio.to_thread(
                 usage_report,
                 Path(get_astrbot_data_path()) / "data_v4.db",
                 snapshot=snapshot,
                 price_label=self.prices.label(),
                 eligible_provider_ids=eligible,
+                platform_id=event.get_platform_id(),
             )
-        except sqlite3.Error as exc:
+        except (sqlite3.Error, ValueError) as exc:
             logger.warning("Usage query failed: %s", type(exc).__name__)
             return "暂时无法读取用量统计，请稍后再试。"
 
